@@ -45,7 +45,6 @@ pub mod core;
 pub mod domain;
 pub mod shared;
 pub mod infrastructure;
-
 // Re-export main types and traits
 use shared::error::WalletError;
 use crate::core::storage::StorageManager;
