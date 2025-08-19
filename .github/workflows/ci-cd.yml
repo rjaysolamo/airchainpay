@@ -13,9 +13,10 @@ jobs:
       run:
         working-directory: ./airchainpay-contracts
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Use Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18.x'
           cache: 'npm'
@@ -28,18 +29,77 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./airchainpay-relay
+        working-directory: ./airchainpay-relay-rust/airchainpay-relay
     steps:
-      - uses: actions/checkout@v3
-      - name: Use Node.js
-        uses: actions/setup-node@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.75.0
         with:
-          node-version: '18.x'
-          cache: 'npm'
-          cache-dependency-path: './airchainpay-relay/package-lock.json'
-      - run: npm ci
-      - run: npm run lint
-      - run: npm test
+          components: rustfmt, clippy
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libudev-dev
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+      - name: Run tests
+        run: cargo test
+
+  test-wallet-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./airchainpay-wallet-core
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.75.0
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libudev-dev
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+      - name: Run tests
+        run: cargo test
 
   build-wallet:
     runs-on: ubuntu-latest
@@ -47,9 +107,10 @@ jobs:
       run:
         working-directory: ./airchainpay-wallet
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Use Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18.x'
           cache: 'npm'
@@ -60,30 +121,31 @@ jobs:
         run: npx tsc --noEmit
 
   deploy-relay:
-    needs: [test-contracts, test-relay]
+    needs: [test-contracts, test-relay, test-wallet-core]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./airchainpay-relay
+        working-directory: ./airchainpay-relay-rust/airchainpay-relay
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
       
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       
       - name: Login to DockerHub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
-          context: ./airchainpay-relay
+          context: ./airchainpay-relay-rust/airchainpay-relay
           push: true
           tags: airchainpay/relay:latest,airchainpay/relay:${{ github.sha }}
       
       # Add deployment steps here (e.g., to AWS, Azure, GCP, etc.)
-      # This is just a placeholder for actual deployment steps 
+      # This is just a placeholder for actual deployment steps

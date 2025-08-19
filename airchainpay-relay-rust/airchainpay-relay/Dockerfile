@@ -1,5 +1,5 @@
 # Multi-stage build for Rust relay server
-
+FROM rust:1.75-bookworm as builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -59,4 +59,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:4000/health || exit 1
 
 # Run the application
-CMD ["./airchainpay-relay"] 
+CMD ["./airchainpay-relay"]
