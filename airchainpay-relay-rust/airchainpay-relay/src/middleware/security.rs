@@ -181,15 +181,17 @@ where
 
             // Log suspicious activity
             if Self::is_suspicious_request(&client_ip, user_agent, &path) {
-                Self::log_security_event(
+                Self::log_security_event_with_params(
                     &req,
                     &security_config,
-                    &client_ip,
-                    user_agent,
-                    &path,
-                    "SUSPICIOUS_REQUEST",
-                    None,
-                    "HIGH"
+                    SecurityEventParams {
+                        client_ip: client_ip.clone(),
+                        user_agent: user_agent.to_string(),
+                        path: path.clone(),
+                        event_type: "SUSPICIOUS_REQUEST".to_string(),
+                        details: None,
+                        severity: "HIGH".to_string(),
+                    }
                 );
             }
 
@@ -203,6 +205,16 @@ where
             Ok(res.map_into_boxed_body())
         })
     }
+}
+
+#[derive(Debug)]
+pub struct SecurityEventParams {
+    pub client_ip: String,
+    pub user_agent: String,
+    pub path: String,
+    pub event_type: String,
+    pub details: Option<HashMap<String, String>>,
+    pub severity: String,
 }
 
 impl<S> SecurityMiddlewareService<S> {
@@ -224,22 +236,18 @@ impl<S> SecurityMiddlewareService<S> {
     }
 
     #[allow(dead_code)]
-    fn log_security_event(
+    fn log_security_event_with_params(
         _req: &ServiceRequest,
         _security_config: &SecurityConfig,
-        client_ip: &str,
-        user_agent: &str,
-        path: &str,
-        event_type: &str,
-        details: Option<HashMap<String, String>>,
-        severity: &str,
+        params: SecurityEventParams,
     ) {
         // In a real implementation, this would log to a security monitoring system
         eprintln!(
-            "SECURITY_EVENT: {event_type} - IP: {client_ip} - UA: {user_agent} - Path: {path} - Severity: {severity}"
+            "SECURITY_EVENT: {} - IP: {} - UA: {} - Path: {} - Severity: {}",
+            params.event_type, params.client_ip, params.user_agent, params.path, params.severity
         );
 
-        if let Some(details) = details {
+        if let Some(details) = params.details {
             for (key, value) in details {
                 eprintln!("  {key}: {value}");
             }
@@ -510,12 +518,10 @@ pub fn cors_config(config: &SecurityConfig) -> Cors {
 }
 
 // Compression configuration
-pub fn compression_config(config: &SecurityConfig) -> Compress {
-    if config.enable_compression {
-        Compress::default()
-    } else {
-        Compress::default()
-    }
+pub fn compression_config(_config: &SecurityConfig) -> Compress {
+    // Always return default compression regardless of config
+    // This simplifies the logic and avoids the if_same_then_else warning
+    Compress::default()
 }
 
 // Logging configuration
@@ -732,4 +738,4 @@ where
             Ok(res.map_into_boxed_body())
         })
     }
-} 
+}

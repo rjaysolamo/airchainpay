@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title AirChainPay
- * @dev Enhanced payment contract supporting offline-signed transactions via meta-transactions.
+ * @dev payment contract supporting offline-signed transactions via meta-transactions.
  * Allows users to send payments with references and supports both direct and relayed transactions.
  */
 contract AirChainPay is EIP712, ReentrancyGuard {

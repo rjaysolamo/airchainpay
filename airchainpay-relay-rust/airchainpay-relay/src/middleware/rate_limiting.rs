@@ -151,28 +151,28 @@ where
 // Specialized rate limiters for different endpoints
 pub struct TransactionRateLimiter;
 impl TransactionRateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(50, 10, Duration::from_secs(60))
     }
 }
 
 pub struct AuthRateLimiter;
 impl AuthRateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(5, 2, Duration::from_secs(900))
     }
 }
 
 pub struct BLERateLimiter;
 impl BLERateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(100, 20, Duration::from_secs(60))
     }
 }
 
 pub struct GlobalRateLimiter;
 impl GlobalRateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(1000, 100, Duration::from_secs(900))
     }
 }
@@ -180,28 +180,28 @@ impl GlobalRateLimiter {
 // Additional specialized rate limiters
 pub struct HealthRateLimiter;
 impl HealthRateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(300, 50, Duration::from_secs(60))
     }
 }
 
 pub struct MetricsRateLimiter;
 impl MetricsRateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(60, 10, Duration::from_secs(60))
     }
 }
 
 pub struct DatabaseRateLimiter;
 impl DatabaseRateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(30, 5, Duration::from_secs(60))
     }
 }
 
 pub struct CompressRateLimiter;
 impl CompressRateLimiter {
-    pub fn new() -> RateLimitingMiddleware {
+    pub fn create() -> RateLimitingMiddleware {
         RateLimitingMiddleware::new(200, 30, Duration::from_secs(60))
     }
 }
@@ -222,14 +222,14 @@ pub struct RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            global: GlobalRateLimiter::new(),
-            auth: AuthRateLimiter::new(),
-            transactions: TransactionRateLimiter::new(),
-            ble: BLERateLimiter::new(),
-            health: HealthRateLimiter::new(),
-            metrics: MetricsRateLimiter::new(),
-            database: DatabaseRateLimiter::new(),
-            compress: CompressRateLimiter::new(),
+            global: GlobalRateLimiter::create(),
+            auth: AuthRateLimiter::create(),
+            transactions: TransactionRateLimiter::create(),
+            ble: BLERateLimiter::create(),
+            health: HealthRateLimiter::create(),
+            metrics: MetricsRateLimiter::create(),
+            database: DatabaseRateLimiter::create(),
+            compress: CompressRateLimiter::create(),
         }
     }
 }
@@ -348,4 +348,4 @@ pub mod utils {
             false
         }
     }
-} 
+}

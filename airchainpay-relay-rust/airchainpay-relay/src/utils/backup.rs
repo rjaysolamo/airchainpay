@@ -196,11 +196,9 @@ impl BackupManager {
         match backup_type {
             BackupType::Full => {
                 if let Ok(entries) = fs::read_dir(data_path) {
-                    for entry in entries {
-                        if let Ok(entry) = entry {
-                            if let Some(file_name) = entry.file_name().to_str() {
-                                files.push(file_name.to_string());
-                            }
+                    for entry in entries.flatten() {
+                        if let Some(file_name) = entry.file_name().to_str() {
+                            files.push(file_name.to_string());
                         }
                     }
                 }
@@ -264,16 +262,14 @@ impl BackupManager {
         let mut files = Vec::new();
 
         if let Ok(entries) = fs::read_dir(data_path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    if let Ok(metadata) = entry.metadata() {
-                        // Check if file was modified in the last 24 hours
-                        if let Ok(modified) = metadata.modified() {
-                            if let Ok(now) = std::time::SystemTime::now().duration_since(modified) {
-                                if now.as_secs() < 24 * 3600 {
-                                    if let Some(file_name) = entry.file_name().to_str() {
-                                        files.push(file_name.to_string());
-                                    }
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    // Check if file was modified in the last 24 hours
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(now) = std::time::SystemTime::now().duration_since(modified) {
+                            if now.as_secs() < 24 * 3600 {
+                                if let Some(file_name) = entry.file_name().to_str() {
+                                    files.push(file_name.to_string());
                                 }
                             }
                         }
@@ -625,4 +621,4 @@ impl Default for RestoreOptions {
             overwrite_existing: false,
         }
     }
-} 
+}

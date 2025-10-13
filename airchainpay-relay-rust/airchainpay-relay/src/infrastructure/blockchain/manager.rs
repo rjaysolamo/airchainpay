@@ -98,23 +98,45 @@ impl BlockchainManager {
             contracts,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetaTransactionParams {
+    pub chain_id: u64,
+    pub from: Address,
+    pub to: Address,
+    pub amount: U256,
+    pub payment_reference: String,
+    pub deadline: U256,
+    pub signature: Bytes,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenMetaTransactionParams {
+    pub chain_id: u64,
+    pub from: Address,
+    pub to: Address,
+    pub token: Address,
+    pub amount: U256,
+    pub payment_reference: String,
+    pub deadline: U256,
+    pub signature: Bytes,
+}
+
+// Removed new() methods to avoid too_many_arguments warning.
+// Use struct literal initialization instead:
+// MetaTransactionParams { chain_id, from, to, amount, payment_reference, deadline, signature }
+// TokenMetaTransactionParams { chain_id, from, to, token, amount, payment_reference, deadline, signature }
+
+impl BlockchainManager {
 
     /// Execute a meta-transaction on the AirChainPay contract
-    pub async fn execute_meta_transaction(
-        &self,
-        chain_id: u64,
-        from: Address,
-        to: Address,
-        amount: U256,
-        payment_reference: String,
-        deadline: U256,
-        signature: Bytes,
-    ) -> Result<H256> {
-        let contract = self.get_contract(chain_id, ContractType::AirChainPay)?;
+    pub async fn execute_meta_transaction(&self, params: MetaTransactionParams) -> Result<H256> {
+        let contract = self.get_contract(params.chain_id, ContractType::AirChainPay)?;
         
         let call = contract.method::<_, H256>(
             "executeMetaTransaction",
-            (from, to, amount, payment_reference, deadline, signature)
+            (params.from, params.to, params.amount, params.payment_reference, params.deadline, params.signature)
         )?;
         
         let pending_tx = call.send().await?;
@@ -123,22 +145,12 @@ impl BlockchainManager {
     }
 
     /// Execute a token meta-transaction on the AirChainPayToken contract
-    pub async fn execute_token_meta_transaction(
-        &self,
-        chain_id: u64,
-        from: Address,
-        to: Address,
-        token: Address,
-        amount: U256,
-        payment_reference: String,
-        deadline: U256,
-        signature: Bytes,
-    ) -> Result<H256> {
-        let contract = self.get_contract(chain_id, ContractType::AirChainPayToken)?;
+    pub async fn execute_token_meta_transaction(&self, params: TokenMetaTransactionParams) -> Result<H256> {
+        let contract = self.get_contract(params.chain_id, ContractType::AirChainPayToken)?;
         
         let call = contract.method::<_, H256>(
             "executeTokenMetaTransaction",
-            (from, to, token, amount, payment_reference, deadline, signature)
+            (params.from, params.to, params.token, params.amount, params.payment_reference, params.deadline, params.signature)
         )?;
         
         let pending_tx = call.send().await?;

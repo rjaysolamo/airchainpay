@@ -2711,8 +2711,8 @@ async fn detailed_contract_health_check(
     let config = config_manager.get_config().await;
     let mut detailed_status = HashMap::new();
     
-    for (chain_id, _chain_config) in &config.supported_chains {
-        let mut chain_tests = HashMap::new();
+ for chain_id in config.supported_chains.keys() {
+            let mut chain_tests = HashMap::new();
         
         // Test 1: Basic contract connectivity
         let basic_connectivity = match test_contract_connectivity(blockchain_manager.as_ref(), *chain_id).await {

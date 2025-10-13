@@ -26,7 +26,6 @@ pub struct SecureResult {
 
 impl SecureResult {
     fn success(data: String) -> Self {
-        // Handle CString creation errors gracefully
         match CString::new(data) {
             Ok(c_string) => Self {
                 success: true,

@@ -148,16 +148,16 @@ where
             let path = req.path().to_string();
 
             if is_suspicious_request(&client_ip, user_agent, &path) {
-                log_security_event(
-                    &req,
-                    &config,
-                    &client_ip,
+                log_security_event_with_params(SecurityEventParams {
+                    req: &req,
+                    config: &config,
+                    client_ip: &client_ip,
                     user_agent,
-                    &path,
-                    "SUSPICIOUS_REQUEST",
-                    None,
-                    "HIGH"
-                );
+                    path: &path,
+                    event_type: "SUSPICIOUS_REQUEST",
+                    details: None,
+                    severity: "HIGH",
+                });
             }
 
             // 4. Input validation
@@ -202,24 +202,28 @@ fn is_suspicious_request(ip: &str, user_agent: &str, path: &str) -> bool {
     suspicious_paths.iter().any(|p| path.contains(p))
 }
 
-fn log_security_event(
-    _req: &ServiceRequest,
-    _config: &EnhancedSecurityConfig,
-    client_ip: &str,
-    user_agent: &str,
-    path: &str,
-    event_type: &str,
+#[derive(Debug)]
+struct SecurityEventParams<'a> {
+    req: &'a ServiceRequest,
+    config: &'a EnhancedSecurityConfig,
+    client_ip: &'a str,
+    user_agent: &'a str,
+    path: &'a str,
+    event_type: &'a str,
     details: Option<HashMap<String, String>>,
-    severity: &str,
-) {
+    severity: &'a str,
+}
+
+fn log_security_event_with_params(params: SecurityEventParams) {
     // In a real implementation, this would log to a security monitoring system
     eprintln!(
-        "COMPREHENSIVE_SECURITY_EVENT: {event_type} - IP: {client_ip} - UA: {user_agent} - Path: {path} - Severity: {severity}"
+        "COMPREHENSIVE_SECURITY_EVENT: {} - IP: {} - UA: {} - Path: {} - Severity: {}",
+        params.event_type, params.client_ip, params.user_agent, params.path, params.severity
     );
 
-    if let Some(details) = details {
+    if let Some(details) = params.details {
         for (key, value) in details {
-            eprintln!("  {key}: {value}");
+            eprintln!("  {}: {}", key, value);
         }
     }
 }

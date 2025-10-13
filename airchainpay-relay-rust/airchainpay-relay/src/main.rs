@@ -42,7 +42,7 @@ async fn main() -> std::io::Result<()> {
         }
         Err(e) => {
             log::error!("❌ Failed to initialize configuration manager: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Configuration initialization failed: {}", e)));
+            return Err(std::io::Error::other(format!("Configuration initialization failed: {}", e)));
         }
     };
     
@@ -56,8 +56,7 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|e| vec![format!("Validation error: {}", e)]);
     if !validation_errors.is_empty() {
         log::error!("❌ Configuration validation failed: {}", validation_errors.join(", "));
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             format!("Configuration validation failed: {}", validation_errors.join(", ")),
         ));
     }
@@ -69,8 +68,7 @@ async fn main() -> std::io::Result<()> {
         if !airchainpay_relay::infrastructure::config::Config::is_valid_hex_address(&chain_config.contract_address) {
             log::error!("❌ Invalid contract address for chain {} ({}): '{}'", 
                 chain_id, chain_config.name, chain_config.contract_address);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other, 
+            return Err(std::io::Error::other(
                 format!("Invalid contract address for chain {}: {}", chain_id, chain_config.contract_address)
             ));
         }
@@ -87,7 +85,7 @@ async fn main() -> std::io::Result<()> {
         }
         Err(e) => {
             log::error!("❌ Failed to initialize storage: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Storage initialization failed: {}", e)));
+            return Err(std::io::Error::other(format!("Storage initialization failed: {}", e)));
         }
     };
     
@@ -99,7 +97,7 @@ async fn main() -> std::io::Result<()> {
         }
         Err(e) => {
             log::error!("❌ Failed to initialize blockchain manager: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Blockchain manager initialization failed: {}", e)));
+            return Err(std::io::Error::other(format!("Blockchain manager initialization failed: {}", e)));
         }
     };
     
@@ -141,7 +139,7 @@ async fn main() -> std::io::Result<()> {
     // Start the transaction processor with error handling
     if let Err(e) = transaction_processor.start().await {
         log::error!("❌ Failed to start transaction processor: {}", e);
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Transaction processor startup failed: {}", e)));
+        return Err(std::io::Error::other(format!("Transaction processor startup failed: {}", e)));
     }
     log::info!("✅ Transaction processor started successfully");
     

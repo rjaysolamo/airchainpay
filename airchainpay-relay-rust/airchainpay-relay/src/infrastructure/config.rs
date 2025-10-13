@@ -449,7 +449,7 @@ impl Config {
                 ];
                 
                 for var in &required_vars {
-                    if let Err(_) = env::var(var) {
+                    if env::var(var).is_err() {
                         errors.push(format!("Required environment variable {} is not set for production", var));
                     } else if env::var(var).unwrap().is_empty() {
                         errors.push(format!("Required environment variable {} is empty for production", var));
@@ -460,7 +460,7 @@ impl Config {
                 let required_vars = ["API_KEY", "JWT_SECRET"];
                 
                 for var in &required_vars {
-                    if let Err(_) = env::var(var) {
+                    if env::var(var).is_err() {
                         errors.push(format!("Required environment variable {} is not set for staging", var));
                     } else if env::var(var).unwrap().is_empty() {
                         errors.push(format!("Required environment variable {} is empty for staging", var));
@@ -1071,4 +1071,4 @@ mod tests {
             }
         }
     }
-} 
+}

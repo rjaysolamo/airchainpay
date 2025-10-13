@@ -199,12 +199,11 @@ impl TransactionValidator {
 
     async fn validate_nonce(&self, signed_tx: &str, _chain_id: u64) -> Result<()> {
         // Parse nonce from transaction
-        let nonce = self.extract_nonce_from_transaction(signed_tx)
+        let _nonce = self.extract_nonce_from_transaction(signed_tx)
             .ok_or_else(|| anyhow!("Failed to extract nonce from transaction"))?;
         // In a real implementation, compare with on-chain nonce
-        if nonce > u64::MAX {
-            return Err(anyhow!("Nonce is out of range"));
-        }
+        // Note: Since nonce is u64, it cannot exceed u64::MAX by definition
+        // This check is redundant and has been removed
         Ok(())
     }
 
@@ -301,4 +300,4 @@ impl TransactionValidator {
             }
         }
     }
-} 
+}

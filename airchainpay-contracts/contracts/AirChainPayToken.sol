@@ -10,7 +10,7 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 /**
  * @title AirChainPayToken
- * @dev Enhanced payment contract supporting both native tokens and ERC-20 stablecoins
+ * @dev payment contract supporting both native tokens and ERC-20 stablecoins
  * Supports USDC, USDT, and other ERC-20 tokens alongside native currency
  * Now includes offline-signed transaction support via meta-transactions
  */

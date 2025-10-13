@@ -360,9 +360,8 @@ pub mod error_utils {
                 // Categorize blockchain errors
                 let category = if error_msg.contains("network") || error_msg.contains("connection") {
                     ErrorType::Network
-                } else if error_msg.contains("gas") || error_msg.contains("nonce") {
-                    ErrorType::Blockchain
                 } else {
+                    // All other blockchain-related errors (gas, nonce, etc.)
                     ErrorType::Blockchain
                 };
 
@@ -479,4 +478,4 @@ pub mod error_utils {
     pub fn handle_rate_limit_error(retry_after: u64) -> HttpResponse {
         ErrorResponseBuilder::too_many_requests("Rate limit exceeded", retry_after)
     }
-} 
+}

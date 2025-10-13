@@ -357,22 +357,16 @@ impl AuditLogger {
         self.log_event(event).await
     }
 
+
+
     pub async fn log_api_request(
         &self,
-        endpoint: &str,
-        method: &str,
-        user_id: Option<String>,
-        ip_address: Option<String>,
-        user_agent: Option<String>,
-        success: bool,
-        response_time: Option<u64>,
-        error_message: Option<String>,
-        request_id: Option<String>,
+        params: ApiRequestParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut details = HashMap::new();
-        details.insert("endpoint".to_string(), serde_json::Value::String(endpoint.to_string()));
-        details.insert("method".to_string(), serde_json::Value::String(method.to_string()));
-        if let Some(time) = response_time {
+        details.insert("endpoint".to_string(), serde_json::Value::String(params.endpoint.clone()));
+        details.insert("method".to_string(), serde_json::Value::String(params.method.clone()));
+        if let Some(time) = params.response_time {
             details.insert("response_time_ms".to_string(), serde_json::Value::Number(serde_json::Number::from(time)));
         }
 
@@ -380,18 +374,18 @@ impl AuditLogger {
             id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             event_type: AuditEventType::API,
-            user_id,
-            ip_address,
-            user_agent,
+            user_id: params.user_id,
+            ip_address: params.ip_address,
+            user_agent: params.user_agent,
             device_id: None,
-            resource: endpoint.to_string(),
-            action: method.to_string(),
+            resource: params.endpoint,
+            action: params.method,
             details,
-            success,
-            error_message,
+            success: params.success,
+            error_message: params.error_message,
             session_id: None,
-            request_id,
-            severity: if success { AuditSeverity::Low } else { AuditSeverity::Medium },
+            request_id: params.request_id,
+            severity: if params.success { AuditSeverity::Low } else { AuditSeverity::Medium },
             metadata: HashMap::new(),
             server_info: Self::get_server_info(),
         };
@@ -401,30 +395,24 @@ impl AuditLogger {
 
     pub async fn log_authentication(
         &self,
-        user_id: Option<String>,
-        ip_address: Option<String>,
-        user_agent: Option<String>,
-        success: bool,
-        error_message: Option<String>,
-        session_id: Option<String>,
-        request_id: Option<String>,
+        params: AuthenticationParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let event = AuditEvent {
             id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             event_type: AuditEventType::Authentication,
-            user_id,
-            ip_address,
-            user_agent,
+            user_id: params.user_id,
+            ip_address: params.ip_address,
+            user_agent: params.user_agent,
             device_id: None,
-            resource: "auth".to_string(),
-            action: if success { "login_success".to_string() } else { "login_failed".to_string() },
+            resource: "authentication".to_string(),
+            action: if params.success { "login" } else { "failed_login" }.to_string(),
             details: HashMap::new(),
-            success,
-            error_message,
-            session_id,
-            request_id,
-            severity: if success { AuditSeverity::Low } else { AuditSeverity::Medium },
+            success: params.success,
+            error_message: params.error_message,
+            session_id: params.session_id,
+            request_id: params.request_id,
+            severity: if params.success { AuditSeverity::Low } else { AuditSeverity::Medium },
             metadata: HashMap::new(),
             server_info: Self::get_server_info(),
         };
@@ -434,20 +422,13 @@ impl AuditLogger {
 
     pub async fn log_transaction(
         &self,
-        user_id: Option<String>,
-        ip_address: Option<String>,
-        user_agent: Option<String>,
-        tx_hash: Option<String>,
-        chain_id: Option<u64>,
-        success: bool,
-        error_message: Option<String>,
-        request_id: Option<String>,
+        params: TransactionParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut details = HashMap::new();
-        if let Some(hash) = tx_hash {
-            details.insert("tx_hash".to_string(), serde_json::Value::String(hash));
+        if let Some(hash) = &params.tx_hash {
+            details.insert("tx_hash".to_string(), serde_json::Value::String(hash.clone()));
         }
-        if let Some(chain) = chain_id {
+        if let Some(chain) = params.chain_id {
             details.insert("chain_id".to_string(), serde_json::Value::Number(serde_json::Number::from(chain)));
         }
 
@@ -455,18 +436,18 @@ impl AuditLogger {
             id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             event_type: AuditEventType::Transaction,
-            user_id,
-            ip_address,
-            user_agent,
+            user_id: params.user_id,
+            ip_address: params.ip_address,
+            user_agent: params.user_agent,
             device_id: None,
             resource: "transaction".to_string(),
-            action: if success { "transaction_success".to_string() } else { "transaction_failed".to_string() },
+            action: if params.success { "execute" } else { "failed_execute" }.to_string(),
             details,
-            success,
-            error_message,
+            success: params.success,
+            error_message: params.error_message,
             session_id: None,
-            request_id,
-            severity: if success { AuditSeverity::Medium } else { AuditSeverity::High },
+            request_id: params.request_id,
+            severity: if params.success { AuditSeverity::Low } else { AuditSeverity::High },
             metadata: HashMap::new(),
             server_info: Self::get_server_info(),
         };
@@ -476,30 +457,24 @@ impl AuditLogger {
 
     pub async fn log_security_event(
         &self,
-        user_id: Option<String>,
-        ip_address: Option<String>,
-        user_agent: Option<String>,
-        action: String,
-        details: HashMap<String, serde_json::Value>,
-        severity: AuditSeverity,
-        request_id: Option<String>,
+        params: SecurityEventParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let event = AuditEvent {
             id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             event_type: AuditEventType::Security,
-            user_id,
-            ip_address,
-            user_agent,
+            user_id: params.user_id,
+            ip_address: params.ip_address,
+            user_agent: params.user_agent,
             device_id: None,
             resource: "security".to_string(),
-            action,
-            details,
-            success: false,
+            action: params.action,
+            details: params.details,
+            success: true,
             error_message: None,
             session_id: None,
-            request_id,
-            severity,
+            request_id: params.request_id,
+            severity: params.severity,
             metadata: HashMap::new(),
             server_info: Self::get_server_info(),
         };
@@ -797,8 +772,238 @@ pub struct AuditStats {
     pub newest_event: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone)]pub struct ApiRequestParams {
+    pub endpoint: String,
+    pub method: String,
+    pub user_id: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub success: bool,
+    pub response_time: Option<u64>,
+    pub error_message: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl ApiRequestParams {
+    pub fn new(endpoint: &str, method: &str) -> Self {
+        Self {
+            endpoint: endpoint.to_string(),
+            method: method.to_string(),
+            user_id: None,
+            ip_address: None,
+            user_agent: None,
+            success: true,
+            response_time: None,
+            error_message: None,
+            request_id: None,
+        }
+    }
+
+    pub fn with_user_id(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
+        self
+    }
+
+    pub fn with_ip_address(mut self, ip_address: Option<String>) -> Self {
+        self.ip_address = ip_address;
+        self
+    }
+
+    pub fn with_user_agent(mut self, user_agent: Option<String>) -> Self {
+        self.user_agent = user_agent;
+        self
+    }
+
+    pub fn with_success(mut self, success: bool) -> Self {
+        self.success = success;
+        self
+    }
+
+    pub fn with_response_time(mut self, response_time: Option<u64>) -> Self {
+        self.response_time = response_time;
+        self
+    }
+
+    pub fn with_error_message(mut self, error_message: Option<String>) -> Self {
+        self.error_message = error_message;
+        self
+    }
+
+    pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
+        self.request_id = request_id;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthenticationParams {
+    pub user_id: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub success: bool,
+    pub error_message: Option<String>,
+    pub session_id: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl AuthenticationParams {
+    pub fn new(success: bool) -> Self {
+        Self {
+            user_id: None,
+            ip_address: None,
+            user_agent: None,
+            success,
+            error_message: None,
+            session_id: None,
+            request_id: None,
+        }
+    }
+
+    pub fn with_user_id(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
+        self
+    }
+
+    pub fn with_ip_address(mut self, ip_address: Option<String>) -> Self {
+        self.ip_address = ip_address;
+        self
+    }
+
+    pub fn with_user_agent(mut self, user_agent: Option<String>) -> Self {
+        self.user_agent = user_agent;
+        self
+    }
+
+    pub fn with_error_message(mut self, error_message: Option<String>) -> Self {
+        self.error_message = error_message;
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
+        self.request_id = request_id;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionParams {
+    pub user_id: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub tx_hash: Option<String>,
+    pub chain_id: Option<u64>,
+    pub success: bool,
+    pub error_message: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl TransactionParams {
+    pub fn new(success: bool) -> Self {
+        Self {
+            user_id: None,
+            ip_address: None,
+            user_agent: None,
+            tx_hash: None,
+            chain_id: None,
+            success,
+            error_message: None,
+            request_id: None,
+        }
+    }
+
+    pub fn with_user_id(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
+        self
+    }
+
+    pub fn with_ip_address(mut self, ip_address: Option<String>) -> Self {
+        self.ip_address = ip_address;
+        self
+    }
+
+    pub fn with_user_agent(mut self, user_agent: Option<String>) -> Self {
+        self.user_agent = user_agent;
+        self
+    }
+
+    pub fn with_tx_hash(mut self, tx_hash: Option<String>) -> Self {
+        self.tx_hash = tx_hash;
+        self
+    }
+
+    pub fn with_chain_id(mut self, chain_id: Option<u64>) -> Self {
+        self.chain_id = chain_id;
+        self
+    }
+
+    pub fn with_error_message(mut self, error_message: Option<String>) -> Self {
+        self.error_message = error_message;
+        self
+    }
+
+    pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
+        self.request_id = request_id;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SecurityEventParams {
+    pub user_id: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub action: String,
+    pub details: HashMap<String, serde_json::Value>,
+    pub severity: AuditSeverity,
+    pub request_id: Option<String>,
+}
+
+impl SecurityEventParams {
+    pub fn new(action: String, severity: AuditSeverity) -> Self {
+        Self {
+            user_id: None,
+            ip_address: None,
+            user_agent: None,
+            action,
+            details: HashMap::new(),
+            severity,
+            request_id: None,
+        }
+    }
+
+    pub fn with_user_id(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
+        self
+    }
+
+    pub fn with_ip_address(mut self, ip_address: Option<String>) -> Self {
+        self.ip_address = ip_address;
+        self
+    }
+
+    pub fn with_user_agent(mut self, user_agent: Option<String>) -> Self {
+        self.user_agent = user_agent;
+        self
+    }
+
+    pub fn with_details(mut self, details: HashMap<String, serde_json::Value>) -> Self {
+        self.details = details;
+        self
+    }
+
+    pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
+        self.request_id = request_id;
+        self
+    }
+}
+
 impl Default for AuditLogger {
     fn default() -> Self {
         Self::new("audit.log".to_string(), 10000)
     }
-} 
+}

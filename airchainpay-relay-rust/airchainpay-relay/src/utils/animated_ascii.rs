@@ -19,6 +19,12 @@ pub struct AnimatedAscii {
     current_color: usize,
 }
 
+impl Default for AnimatedAscii {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AnimatedAscii {
     pub fn new() -> Self {
         let logo = vec![
@@ -116,7 +122,7 @@ impl AnimatedAscii {
     }
 
     fn add_glow_effect(&self, text: &str, intensity: f32) -> String {
-        let glow_chars = vec!["░", "▒", "▓", "█"];
+        let glow_chars =["░", "▒", "▓", "█"];
         let glow_index = (intensity * (glow_chars.len() - 1) as f32) as usize;
         let glow_char = glow_chars[glow_index.min(glow_chars.len() - 1)];
         
@@ -124,7 +130,7 @@ impl AnimatedAscii {
     }
 
     fn apply_matrix_effect(&self, text: &str, line_index: usize) -> String {
-        let matrix_chars = vec!["░", "▒", "▓", "█"];
+        let matrix_chars =["░", "▒", "▓", "█"];
         let char_index = (self.current_frame + line_index) % matrix_chars.len();
         let matrix_char = matrix_chars[char_index];
         
@@ -188,4 +194,4 @@ pub fn display_animated_logo() {
 pub fn display_simple_animation() {
     let mut animator = AnimatedAscii::new();
     animator.display_simple_animation();
-} 
+}

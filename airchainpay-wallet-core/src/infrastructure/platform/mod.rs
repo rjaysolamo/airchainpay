@@ -230,7 +230,7 @@ impl SecureFileStorage {
         {
             return Ok("test_password".to_string());
         }
-        rpassword::prompt_password("Enter password for secure storage: ")
+        password::prompt_password("Enter password for secure storage: ")
             .map_err(|e| WalletError::crypto(format!("Password prompt failed: {}", e)))
     }
 
