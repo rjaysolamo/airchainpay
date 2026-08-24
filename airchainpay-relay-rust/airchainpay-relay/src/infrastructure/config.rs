@@ -414,6 +414,9 @@ impl Config {
         
         // Try to load from config file first
         if let Ok(config) = Self::load_from_file() {
+            // Validate file-based configuration as well, so it cannot bypass the
+            // security checks that are applied to environment-based configuration.
+            config.validate()?;
             return Ok(config);
         }
         
@@ -577,8 +580,9 @@ impl Config {
                 enable_rate_limiting: true,
                 enable_cors: true,
                 cors_origins: env::var("CORS_ORIGINS").unwrap_or_else(|_| "https://staging.airchainpay.com,https://staging-wallet.airchainpay.com".to_string()),
-                jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "staging_secret".to_string()),
-                api_key: env::var("API_KEY").unwrap_or_else(|_| "staging_key".to_string()),
+                // No weak fallback: an unset/empty secret is rejected by validate().
+                jwt_secret: env::var("JWT_SECRET").unwrap_or_default(),
+                api_key: env::var("API_KEY").unwrap_or_default(),
                 max_connections: 50,
                 session_timeout: 1800,
             },
@@ -625,8 +629,9 @@ impl Config {
                 enable_rate_limiting: env::var("ENABLE_RATE_LIMITING").unwrap_or_else(|_| "true".to_string()) != "false",
                 enable_cors: env::var("ENABLE_CORS").unwrap_or_else(|_| "true".to_string()) != "false",
                 cors_origins: env::var("CORS_ORIGINS").unwrap_or_else(|_| "https://app.airchainpay.com,https://wallet.airchainpay.com".to_string()),
-                jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "production_secret".to_string()),
-                api_key: env::var("API_KEY").unwrap_or_else(|_| "production_key".to_string()),
+                // No weak fallback: an unset/empty secret is rejected by validate().
+                jwt_secret: env::var("JWT_SECRET").unwrap_or_default(),
+                api_key: env::var("API_KEY").unwrap_or_default(),
                 max_connections: 100,
                 session_timeout: 3600,
             },
@@ -903,7 +908,42 @@ impl Config {
 
         chains
     }
-    
+
+    /// Rejects known weak/default secret values and secrets that are too short.
+    /// This provides defense-in-depth so that even a config file cannot ship a
+    /// guessable secret to a non-development environment.
+    fn reject_weak_secret(field_name: &str, value: &str) -> Result<()> {
+        const WEAK_SECRETS: [&str; 10] = [
+            "dev_jwt_secret",
+            "dev_api_key",
+            "staging_secret",
+            "staging_key",
+            "production_secret",
+            "production_key",
+            "changeme",
+            "secret",
+            "password",
+            "test",
+        ];
+
+        let normalized = value.trim().to_lowercase();
+        if WEAK_SECRETS.contains(&normalized.as_str()) {
+            return Err(anyhow!(
+                "{} is set to a known weak/default value; provide a strong unique secret via environment variable",
+                field_name
+            ));
+        }
+
+        if value.len() < 16 {
+            return Err(anyhow!(
+                "{} must be at least 16 characters long for adequate entropy",
+                field_name
+            ));
+        }
+
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         // Validate main contract address
         if !self.contract_address.is_empty() && !Self::is_valid_hex_address(&self.contract_address) {
@@ -953,6 +993,10 @@ impl Config {
                         return Err(anyhow!("{} is required in production environment", field_name));
                     }
                 }
+
+                // Reject known weak/default or too-short secrets in production.
+                Self::reject_weak_secret("JWT_SECRET", &self.security.jwt_secret)?;
+                Self::reject_weak_secret("API_KEY", &self.security.api_key)?;
             }
             "staging" => {
                 if self.security.api_key.is_empty() {
@@ -961,6 +1005,10 @@ impl Config {
                 if self.security.jwt_secret.is_empty() {
                     return Err(anyhow!("JWT_SECRET is required in staging environment"));
                 }
+
+                // Reject known weak/default or too-short secrets in staging.
+                Self::reject_weak_secret("JWT_SECRET", &self.security.jwt_secret)?;
+                Self::reject_weak_secret("API_KEY", &self.security.api_key)?;
             }
             _ => {}
         }

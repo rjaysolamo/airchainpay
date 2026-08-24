@@ -83,6 +83,47 @@ fn validate_input(input: *const c_char, max_length: usize) -> Result<String, Wal
     Ok(sanitized)
 }
 
+/// Validation for free-text inputs (wallet names, seed phrases, messages).
+///
+/// Unlike `validate_input`, this permits spaces and normal punctuation so that
+/// legitimate values such as BIP39 seed phrases ("word1 word2 ...") and
+/// human-readable messages are accepted. It still rejects NUL and other
+/// control characters to guard against injection of dangerous bytes.
+fn validate_text_input(input: *const c_char, max_length: usize) -> Result<String, WalletError> {
+    if input.is_null() {
+        return Err(WalletError::validation("Null input pointer".to_string()));
+    }
+
+    let input_str = unsafe {
+        match CStr::from_ptr(input).to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(WalletError::validation("Invalid UTF-8 input".to_string())),
+        }
+    };
+
+    if input_str.len() > max_length {
+        return Err(WalletError::validation("Input too long".to_string()));
+    }
+
+    if input_str.is_empty() {
+        return Err(WalletError::validation("Empty input".to_string()));
+    }
+
+    // Reject control characters (except common whitespace) to prevent injection
+    // of NUL/escape sequences while still allowing normal text with spaces.
+    let has_dangerous_char = input_str
+        .chars()
+        .any(|c| c.is_control() && c != ' ' && c != '\t' && c != '\n' && c != '\r');
+
+    if has_dangerous_char {
+        return Err(WalletError::validation(
+            "Input contains invalid control characters".to_string(),
+        ));
+    }
+
+    Ok(input_str.to_string())
+}
+
 /// Validate network ID
 fn validate_network(network: i32) -> Result<Network, WalletError> {
     match network {
@@ -99,7 +140,8 @@ pub extern "C" fn wallet_core_create_wallet(
     network: i32,
 ) -> SecureResult {
     // Validate inputs
-    let name_str = match validate_input(name, 50) {
+    // Wallet names may contain spaces, so use the free-text validator.
+    let name_str = match validate_text_input(name, 50) {
         Ok(s) => s,
         Err(_) => return SecureResult::error(1), // Invalid input
     };
@@ -165,11 +207,14 @@ pub extern "C" fn wallet_core_create_wallet(
 pub extern "C" fn wallet_core_import_wallet(
     seed_phrase: *const c_char,
 ) -> SecureResult {
-    // Validate seed phrase input
-    let seed_phrase_str = match validate_input(seed_phrase, 200) {
+    // Validate seed phrase input (BIP39 phrases contain spaces between words).
+    let seed_phrase_raw = match validate_text_input(seed_phrase, 200) {
         Ok(s) => s,
         Err(_) => return SecureResult::error(1), // Invalid input
     };
+
+    // Normalize surrounding whitespace (does not alter the BIP39 words themselves).
+    let seed_phrase_str = seed_phrase_raw.trim().to_string();
 
     // Validate seed phrase format
     let words: Vec<&str> = seed_phrase_str.split_whitespace().collect();
@@ -240,7 +285,8 @@ pub extern "C" fn wallet_core_sign_message(
         Err(_) => return SecureResult::error(1), // Invalid input
     };
 
-    let message_str = match validate_input(message, 1000) {
+    // Messages can contain spaces/punctuation, so use the free-text validator.
+    let message_str = match validate_text_input(message, 1000) {
         Ok(s) => s,
         Err(_) => return SecureResult::error(1), // Invalid input
     };
