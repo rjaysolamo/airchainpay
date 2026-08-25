@@ -4,13 +4,20 @@ pragma solidity ^0.8.21;
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title AirChainPay
  * @dev payment contract supporting offline-signed transactions via meta-transactions.
  * Allows users to send payments with references and supports both direct and relayed transactions.
+ *
+ * NATIVE FUNDING MODEL (IMPORTANT): unlike ERC-20 `transferFrom`, native coins
+ * cannot be pulled from the signer `from` by a signature. `executeMetaTransaction`
+ * requires `msg.value == amount`, so the CALLER (relayer) funds the payment and
+ * the signature only authorizes routing that value to `to`. The signer `from`'s
+ * balance is NOT debited on-chain; reimbursement (if any) must occur out-of-band.
  */
-contract AirChainPay is EIP712, ReentrancyGuard {
+contract AirChainPay is EIP712, ReentrancyGuard, Pausable {
     using ECDSA for bytes32;
 
     // Owner of the contract
@@ -31,9 +38,29 @@ contract AirChainPay is EIP712, ReentrancyGuard {
     // Emitted when a meta-transaction is executed
     event MetaTransactionExecuted(address indexed from, address indexed to, uint256 amount, string paymentReference);
 
+    // Restricts a function to the contract owner.
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
     // Set the contract owner at deployment
     constructor() EIP712("AirChainPay", "1") {
         owner = msg.sender;
+    }
+
+    /**
+     * @dev Emergency stop: pause meta-transaction execution (owner only).
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /**
+     * @dev Resume meta-transaction execution after a pause (owner only).
+     */
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
     /**
@@ -65,7 +92,7 @@ contract AirChainPay is EIP712, ReentrancyGuard {
         string calldata paymentReference,
         uint256 deadline,
         bytes calldata signature
-    ) external payable nonReentrant {
+    ) external payable nonReentrant whenNotPaused {
         require(to != address(0), "Invalid recipient");
         require(amount > 0, "No value sent");
         require(msg.value == amount, "Incorrect value sent");
@@ -116,7 +143,7 @@ contract AirChainPay is EIP712, ReentrancyGuard {
         string calldata paymentReference,
         uint256 deadline,
         bytes calldata signature
-    ) external payable nonReentrant {
+    ) external payable nonReentrant whenNotPaused {
         require(recipients.length == amounts.length, "Array length mismatch");
         require(recipients.length > 0 && recipients.length <= 10, "Invalid batch size");
         require(block.timestamp <= deadline, "Transaction expired");
@@ -189,8 +216,7 @@ contract AirChainPay is EIP712, ReentrancyGuard {
      * @dev Owner can withdraw contract balance
      * @param amount Amount to withdraw (in wei)
      */
-    function withdraw(uint256 amount) external {
-        require(msg.sender == owner, "Not owner");
+    function withdraw(uint256 amount) external onlyOwner {
         require(address(this).balance >= amount, "Insufficient balance");
         emit Withdrawal(owner, amount);
         (bool sent, ) = owner.call{value: amount}("");

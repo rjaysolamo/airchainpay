@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
@@ -14,7 +15,7 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
  * Supports USDC, USDT, and other ERC-20 tokens alongside native currency
  * Now includes offline-signed transaction support via meta-transactions
  */
-contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
+contract AirChainPayToken is ReentrancyGuard, Ownable, Pausable, EIP712 {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
 
@@ -121,6 +122,33 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
     }
 
     /**
+     * @dev Emergency stop: pause all meta-transaction execution (owner only).
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /**
+     * @dev Resume meta-transaction execution after a pause (owner only).
+     */
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    /**
+     * @dev Transfer ERC-20 tokens from `from` to `to` and verify the recipient
+     * actually received the full `amount`. Rejects fee-on-transfer / rebasing
+     * tokens (which would under-deliver) with `TransferFailed` instead of
+     * silently short-changing the recipient.
+     */
+    function _safeTransferFromExact(IERC20 token, address from, address to, uint256 amount) private {
+        uint256 balanceBefore = token.balanceOf(to);
+        token.safeTransferFrom(from, to, amount);
+        uint256 received = token.balanceOf(to) - balanceBefore;
+        if (received != amount) revert TransferFailed();
+    }
+
+    /**
      * @dev Add support for an ERC-20 token
      * @param token Token contract address
      * @param symbol Token symbol
@@ -180,6 +208,15 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
 
     /**
      * @dev Execute a native token meta-transaction (offline-signed)
+     *
+     * FUNDING MODEL (IMPORTANT): native coins cannot be pulled from `from` via a
+     * signature the way ERC-20 `transferFrom` allows. The caller (relayer) MUST
+     * attach `msg.value == amount`, so the CALLER funds the payment, not the
+     * signer `from`. The signature therefore authorizes *routing* of the
+     * relayer-supplied value to `to` on `from`'s behalf; it does NOT move
+     * `from`'s balance. Any reimbursement of the relayer by `from` must happen
+     * out-of-band (or via the ERC-20 path, which does debit `from`).
+     *
      * @param from The address that signed the transaction
      * @param to Recipient address
      * @param amount Payment amount
@@ -194,7 +231,7 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
         string calldata paymentReference,
         uint256 deadline,
         bytes calldata signature
-    ) external payable nonReentrant {
+    ) external payable nonReentrant whenNotPaused {
         if (to == address(0)) revert InvalidRecipient();
         if (amount == 0) revert InvalidAmount();
         if (bytes(paymentReference).length == 0) revert InvalidPaymentReference();
@@ -296,7 +333,7 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
         string calldata paymentReference,
         uint256 deadline,
         bytes calldata signature
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         if (to == address(0)) revert InvalidRecipient();
         if (amount == 0) revert InvalidAmount();
         if (bytes(paymentReference).length == 0) revert InvalidPaymentReference();
@@ -366,8 +403,8 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
         userPaymentCount[from]++;
         totalTokenVolume[token] += amount;
 
-        // Transfer tokens
-        tokenContract.safeTransferFrom(from, to, netAmount);
+        // Transfer tokens (verifies exact delivery; rejects fee-on-transfer tokens)
+        _safeTransferFromExact(tokenContract, from, to, netAmount);
         
         // Transfer fee to contract (if any)
         if (fee > 0) {
@@ -423,7 +460,7 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
         string calldata paymentReference,
         uint256 deadline,
         bytes calldata signature
-    ) external payable nonReentrant {
+    ) external payable nonReentrant whenNotPaused {
         require(recipients.length == amounts.length, "Array length mismatch");
         require(recipients.length > 0 && recipients.length <= 10, "Invalid batch size");
         require(block.timestamp <= deadline, "Transaction expired");
@@ -532,7 +569,7 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
         string calldata paymentReference,
         uint256 deadline,
         bytes calldata signature
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         require(recipients.length == amounts.length, "Array length mismatch");
         require(recipients.length > 0 && recipients.length <= 10, "Invalid batch size");
         require(block.timestamp <= deadline, "Transaction expired");
@@ -609,8 +646,8 @@ contract AirChainPayToken is ReentrancyGuard, Ownable, EIP712 {
             userPaymentCount[from]++;
             totalTokenVolume[token] += amounts[i];
 
-            // Transfer tokens
-            tokenContract.safeTransferFrom(from, recipients[i], netAmount);
+            // Transfer tokens (verifies exact delivery; rejects fee-on-transfer tokens)
+            _safeTransferFromExact(tokenContract, from, recipients[i], netAmount);
             
             // Transfer fee to contract (if any)
             if (fee > 0) {

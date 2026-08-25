@@ -267,7 +267,14 @@ impl DynamicConfigManager {
             errors.push("RPC_URL is required".to_string());
         }
         
-        if config.contract_address.is_empty() {
+        // The top-level `contract_address` is a legacy single-chain field. The
+        // relay is actually multi-chain: the blockchain manager, transaction
+        // validator, API handlers and the startup checks in main.rs all use the
+        // per-chain addresses in `supported_chains`. Only require the scalar in
+        // production (where validate_startup_env_vars() also mandates
+        // CONTRACT_ADDRESS). In development/staging it is optional because the
+        // per-chain addresses (validated below) are the real source of truth.
+        if config.environment == "production" && config.contract_address.is_empty() {
             errors.push("CONTRACT_ADDRESS is required".to_string());
         }
         
@@ -282,6 +289,18 @@ impl DynamicConfigManager {
         // Validate chain configuration
         if config.supported_chains.is_empty() {
             errors.push("At least one supported chain must be configured".to_string());
+        } else {
+            // Ensure at least one chain has a valid contract address, since this
+            // is what the relay actually uses to route/validate transactions.
+            let has_valid_chain_contract = config
+                .supported_chains
+                .values()
+                .any(|c| Config::is_valid_hex_address(&c.contract_address));
+            if !has_valid_chain_contract {
+                errors.push(
+                    "No supported chain has a valid contract address configured".to_string(),
+                );
+            }
         }
         
         Ok(errors)

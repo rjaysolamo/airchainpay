@@ -37,36 +37,36 @@ async fn main() -> std::io::Result<()> {
     // Initialize dynamic configuration manager with error handling
     let config_manager = match DynamicConfigManager::new() {
         Ok(manager) => {
-            log::info!("✅ Configuration manager initialized successfully");
+            log::info!("Configuration manager initialized successfully");
             Arc::new(manager)
         }
         Err(e) => {
-            log::error!("❌ Failed to initialize configuration manager: {}", e);
+            log::error!("Failed to initialize configuration manager: {}", e);
             return Err(std::io::Error::other(format!("Configuration initialization failed: {}", e)));
         }
     };
     
     // Get initial configuration
     let config = config_manager.get_config().await;
-    log::info!("✅ Configuration loaded successfully");
+    log::info!("Configuration loaded successfully");
     
     // Validate configuration before blockchain manager init
     log::info!("🔍 Validating configuration...");
     let validation_errors = config_manager.validate_config().await
         .unwrap_or_else(|e| vec![format!("Validation error: {}", e)]);
     if !validation_errors.is_empty() {
-        log::error!("❌ Configuration validation failed: {}", validation_errors.join(", "));
+        log::error!("Configuration validation failed: {}", validation_errors.join(", "));
         return Err(std::io::Error::other(
             format!("Configuration validation failed: {}", validation_errors.join(", ")),
         ));
     }
-    log::info!("✅ Configuration validation passed");
+    log::info!("Configuration validation passed");
     
     // Validate contract addresses with detailed error logging
     log::info!("🔍 Validating contract addresses...");
     for (chain_id, chain_config) in &config.supported_chains {
         if !airchainpay_relay::infrastructure::config::Config::is_valid_hex_address(&chain_config.contract_address) {
-            log::error!("❌ Invalid contract address for chain {} ({}): '{}'", 
+            log::error!("Invalid contract address for chain {} ({}): '{}'", 
                 chain_id, chain_config.name, chain_config.contract_address);
             return Err(std::io::Error::other(
                 format!("Invalid contract address for chain {}: {}", chain_id, chain_config.contract_address)
@@ -75,16 +75,16 @@ async fn main() -> std::io::Result<()> {
         log::info!("✅ Contract address for chain {} ({}): {}", 
             chain_id, chain_config.name, chain_config.contract_address);
     }
-    log::info!("✅ All contract addresses validated successfully");
+    log::info!("All contract addresses validated successfully");
     
     // Initialize storage with error handling
     let storage = match Storage::new() {
         Ok(storage) => {
-            log::info!("✅ Storage initialized successfully");
+            log::info!("Storage initialized successfully");
             Arc::new(storage)
         }
         Err(e) => {
-            log::error!("❌ Failed to initialize storage: {}", e);
+            log::error!(" Failed to initialize storage: {}", e);
             return Err(std::io::Error::other(format!("Storage initialization failed: {}", e)));
         }
     };
@@ -92,7 +92,7 @@ async fn main() -> std::io::Result<()> {
     // Initialize blockchain manager with error handling
     let blockchain_manager = match BlockchainManager::new(config.clone()) {
         Ok(manager) => {
-            log::info!("✅ Blockchain manager initialized successfully");
+            log::info!("Blockchain manager initialized successfully");
             Arc::new(manager)
         }
         Err(e) => {
@@ -149,13 +149,50 @@ async fn main() -> std::io::Result<()> {
     log::info!("🌐 Starting AirChainPay Relay Server on port {}", port);
     log::info!("📊 Environment: {}", config.environment);
     log::info!("🔗 Supported chains: {}", config.supported_chains.len());
-    
+
+    // Build a CORS policy from configuration instead of a fully permissive one.
+    // `Cors::permissive()` allows ANY origin together with credentials, which is a
+    // security anti-pattern (and rejected by browsers). We derive the policy from
+    // `CORS_ORIGINS` (comma-separated) exposed via `config.security.cors_origins`.
+    let cors_origins_raw = config.security.cors_origins.clone();
+    let cors_allow_any = cors_origins_raw.split(',').any(|o| o.trim() == "*");
+    let cors_allowed_origins: Vec<String> = cors_origins_raw
+        .split(',')
+        .map(|o| o.trim().to_string())
+        .filter(|o| !o.is_empty() && o != "*")
+        .collect();
+    if cors_allow_any {
+        log::warn!("⚠️  CORS allows ANY origin ('*'); credentials are DISABLED for safety. Set CORS_ORIGINS to an explicit allow-list in production.");
+    } else {
+        log::info!("🔒 CORS restricted to {} configured origin(s)", cors_allowed_origins.len());
+    }
+
     HttpServer::new(move || {
+        // Construct a fresh CORS middleware per worker from the resolved policy.
+        let mut cors = actix_cors::Cors::default()
+            .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+            .allowed_headers(vec![
+                actix_web::http::header::CONTENT_TYPE,
+                actix_web::http::header::AUTHORIZATION,
+            ])
+            .allowed_header("X-API-Key")
+            .max_age(Some(3600usize));
+        if cors_allow_any {
+            // Wildcard origin, but never combined with credentials.
+            cors = cors.allow_any_origin();
+        } else {
+            for origin in &cors_allowed_origins {
+                cors = cors.allowed_origin(origin);
+            }
+            // Credentials are only safe with an explicit origin allow-list.
+            cors = cors.supports_credentials();
+        }
+
         App::new()
             // Global built-in middleware only
             .wrap(actix_web::middleware::Logger::default())
             .wrap(actix_web::middleware::Compress::default())
-            .wrap(actix_cors::Cors::permissive())
+            .wrap(cors)
             .app_data(web::Data::new(Arc::clone(&storage)))
             .app_data(web::Data::new(Arc::clone(&blockchain_manager)))
             .app_data(web::Data::new(Arc::clone(&auth_manager)))

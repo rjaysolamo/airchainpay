@@ -4,10 +4,16 @@
 //! operating systems and platforms (iOS, Android, Linux, macOS, Windows).
 //! 
 //! SECURITY: This module implements hardened storage with:
-//! - Secure enclave integration when available
 //! - Memory zeroization for sensitive data
-//! - Hardware-backed storage on supported platforms
-//! - Secure key derivation and encryption
+//! - Secure key derivation and encryption (Argon2 + AES-256-GCM)
+//!
+//! IMPLEMENTATION STATUS (IMPORTANT): true hardware-backed storage / secure-
+//! enclave integration is NOT yet implemented. Every platform currently uses
+//! `NoSecureEnclave` together with encrypted file storage. The flags returned by
+//! `PlatformFeatures::detect()` describe device *capabilities* (what the hardware
+//! could support), NOT what this crate actually uses today. Do not treat
+//! `has_secure_enclave` / `has_hardware_backed_storage` as a guarantee that keys
+//! are held in hardware — they are not.
 
 use crate::shared::error::WalletError;
 use crate::shared::types::SecurityLevel;
@@ -46,6 +52,11 @@ impl PlatformFeatures {
         let platform_name = sys_info::os_type().unwrap_or_else(|_| "unknown".to_string());
         let architecture = "unknown".to_string();
         
+        // NOTE: these flags report device *capabilities*, not what this crate
+        // currently uses. Secure-enclave / hardware-backed key storage is not yet
+        // wired up — the `SecureEnclave` factory returns `NoSecureEnclave` for
+        // ALL platforms, and keys are held via encrypted file storage. Keep this
+        // in mind before gating security decisions on these values.
         let (has_secure_enclave, has_biometric_auth, has_keychain, has_keystore, has_hardware_backed_storage) = match platform_name.as_str() {
             "ios" => (true, true, true, false, true),
             "android" => (true, true, true, true, true),
@@ -230,7 +241,7 @@ impl SecureFileStorage {
         {
             return Ok("test_password".to_string());
         }
-        password::prompt_password("Enter password for secure storage: ")
+        rpassword::prompt_password("Enter password for secure storage: ")
             .map_err(|e| WalletError::crypto(format!("Password prompt failed: {}", e)))
     }
 

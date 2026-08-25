@@ -67,7 +67,17 @@ impl TransactionValidator {
             result.valid = false;
             result.errors.push(format!("Invalid contract interaction: {e}"));
         }
-        if let Err(e) = self.check_rate_limits().await {
+        // Rate limit per client. We key by the recovered signer address so that
+        // one abusive sender cannot exhaust the shared budget for everyone.
+        // Falls back to a per-`to` address (or "unknown") if the signer cannot
+        // be recovered.
+        let rate_limit_key = self
+            .decode_transaction(signed_tx)
+            .ok()
+            .and_then(|tx| tx.recover_from().ok().map(|addr| format!("{:#x}", addr)))
+            .or_else(|| self.extract_to_address_from_transaction(signed_tx))
+            .unwrap_or_else(|| "unknown".to_string());
+        if let Err(e) = self.check_rate_limits(&rate_limit_key).await {
             result.valid = false;
             result.errors.push(format!("Rate limit exceeded: {e}"));
         }
@@ -128,20 +138,41 @@ impl TransactionValidator {
     }
 
     async fn validate_signature(&self, signed_tx: &str) -> Result<()> {
-        let tx_bytes = hex::decode(signed_tx.trim_start_matches("0x"))
-            .map_err(|e| anyhow!("Failed to decode hex: {}", e))?;
-        if tx_bytes.len() < 65 {
-            return Err(anyhow!("Transaction too short for signature"));
+        // Correct, envelope-aware signature validation.
+        //
+        // The previous implementation naively sliced the last 65 bytes as
+        // `r||s||v` and only accepted `v ∈ {0,1,27,28}`. That is incorrect:
+        //  - EIP-155 legacy transactions encode the chain id into `v`
+        //    (`v = chainId*2 + 35/36`, e.g. 37/38 for chainId 1), so valid txs
+        //    were rejected.
+        //  - Typed transactions (EIP-2930 `0x01`, EIP-1559 `0x02`) are not raw
+        //    RLP with a trailing 65-byte signature at all, so the slice was
+        //    meaningless and could "pass" arbitrary blobs.
+        //
+        // Instead we decode the full transaction (ethers handles every envelope
+        // type) and recover the sender from the signature. Successful recovery
+        // proves the signature is well-formed and internally consistent with the
+        // transaction contents.
+        let tx = self.decode_transaction(signed_tx)?;
+
+        let recovered = tx
+            .recover_from()
+            .map_err(|e| anyhow!("Failed to recover signer from signature: {}", e))?;
+
+        if recovered.is_zero() {
+            return Err(anyhow!("Recovered signer is the zero address"));
         }
-        let signature_start = tx_bytes.len() - 65;
-        let signature = &tx_bytes[signature_start..];
-        if signature.len() != 65 {
-            return Err(anyhow!("Invalid signature length"));
+
+        // If the decoded transaction carries a `from` (populated for many
+        // encodings), ensure it matches the recovered signer.
+        if !tx.from.is_zero() && tx.from != recovered {
+            return Err(anyhow!(
+                "Signature signer {:#x} does not match transaction 'from' {:#x}",
+                recovered,
+                tx.from
+            ));
         }
-        let v = signature[64];
-        if v != 27 && v != 28 && v != 0 && v != 1 {
-            return Err(anyhow!("Invalid signature v value"));
-        }
+
         Ok(())
     }
 
@@ -228,15 +259,18 @@ impl TransactionValidator {
         Ok(())
     }
 
-    async fn check_rate_limits(&self) -> Result<()> {
+    async fn check_rate_limits(&self, client_key: &str) -> Result<()> {
         // Use config.rate_limits
         let window_ms = self.config.rate_limits.window_ms;
         let max_requests = self.config.rate_limits.max_requests;
         if window_ms == 0 || max_requests == 0 {
             return Ok(()); // No rate limiting
         }
-        // For demo: use a single key for all requests (could use IP or user in real use)
-        let key = "global".to_string();
+        // Per-client key (e.g. recovered signer address) so a single client
+        // cannot consume the entire global budget. Note: this remains an
+        // in-memory, per-process limiter — a shared store (e.g. Redis) is still
+        // required for correctness across multiple relay instances.
+        let key = client_key.to_string();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let mut state = self.rate_limit_state.lock().await;
         let (window_start, count) = state.get(&key).cloned().unwrap_or((now, 0));
