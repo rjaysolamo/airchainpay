@@ -56,6 +56,13 @@ pub use core::storage::SecureStorage;
 pub use core::transactions::TransactionManager;
 pub use core::ble::BLESecurityManager;
 
+// Re-export offline sequence-lock / hardware-backed logical nonce API
+pub use core::nonce::{
+    OfflinePayment, OfflinePaymentInput, OfflineQueue, OfflineQueueEntry,
+    OfflineSequenceManager, SignedOfflinePayment,
+};
+
+
 // Re-export domain entities
 pub use crate::domain::Wallet;
 pub use shared::types::{Transaction, TokenInfo, Network};

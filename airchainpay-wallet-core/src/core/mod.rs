@@ -7,7 +7,9 @@ pub mod wallet;
 pub mod crypto;
 pub mod storage;
 pub mod transactions;
+pub mod nonce;
 pub mod ble;
+
 
 /// Initialize core modules
 pub async fn init() -> Result<(), crate::shared::error::WalletError> {

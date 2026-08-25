@@ -45,8 +45,16 @@ export interface ChainConfig {
   };
   blockExplorer: string;
   contractAddress: string;
+  /**
+   * Optional OfflineSecurityVault address for this chain. Used by the
+   * Vault/Escrow Manager and offline logical-nonce flow. When empty, the vault
+   * features are treated as "not configured" and surfaced to the user rather
+   * than throwing at call sites.
+   */
+  vaultAddress?: string;
   type: ChainType;
 }
+
 
 export const SUPPORTED_CHAINS: { [key: string]: ChainConfig } = {
   base_sepolia: {

@@ -375,6 +375,12 @@ export default function HomeScreen() {
     router.push('/qr-pay');
   };
 
+  // Navigate to Vault & Escrow manager screen
+  const goToVault = () => {
+    router.push('/vault' as any);
+  };
+
+
   // Handle import seed phrase
   const handleImportSeedPhrase = () => {
     setSeedPhraseInput('');
@@ -900,7 +906,22 @@ export default function HomeScreen() {
                   <Text style={[styles.actionSubtext, styles.bleSubtext]}>Scan to pay</Text>
                 </View>
               </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={[styles.actionButton, styles.qrButton]}
+                onPress={goToVault}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.actionIcon, styles.qrIcon]}>
+                  <Ionicons name="lock-closed" size={28} color="#FFFFFF" />
+                </View>
+                <View style={styles.bleButtonContent}>
+                  <Text style={[styles.actionText, styles.bleText]}>Vault & Escrow</Text>
+                  <Text style={[styles.actionSubtext, styles.bleSubtext]}>Secure funds for offline payments</Text>
+                </View>
+              </TouchableOpacity>
             </AnimatedCard>
+
 
             {/* Recent Transactions */}
             {recentTransactions.length > 0 && (

@@ -1444,6 +1444,30 @@ export class MultiChainWalletManager {
     return provider;
   }
 
+  /**
+   * Get a provider-connected signer for the given chain.
+   *
+   * This is the sanctioned way for higher-level services (e.g. VaultService)
+   * to obtain an ethers signer without duplicating the load/connect logic or
+   * touching private key material directly. The returned signer is bound to the
+   * chain's JSON-RPC provider so it can both sign and broadcast.
+   */
+  public async getSigner(chainId: string): Promise<ethers.Wallet> {
+    const wallet = await this.createOrLoadWallet();
+    const provider = this.providers[chainId];
+
+    if (!provider) {
+      throw new Error(`Provider not initialized for chain ${chainId}`);
+    }
+
+    if (!isEthersWallet(wallet)) {
+      throw new Error('Unsupported wallet type for getSigner');
+    }
+
+    return wallet.connect(provider);
+  }
+
+
   // Add logout method to clear authentication data only (not wallet data)
   async logout(clearWalletData: boolean = false): Promise<void> {
     try {

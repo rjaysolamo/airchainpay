@@ -192,8 +192,17 @@ export class PayloadCompressor {
           expiry: paymentData.metadata.expiry || 0,
           timestamp: paymentData.metadata.timestamp || Date.now(),
           extra: paymentData.metadata.extra || {}
-        } : undefined
+        } : undefined,
+        // Logical-nonce offline payment fields (Module 2). Defaults keep the
+        // wire format identical to legacy payments when no offline
+        // authorization is attached (signature stays empty).
+        logicalNonce: paymentData.logicalNonce || 0,
+        signature: paymentData.signature || '',
+        deadline: paymentData.deadline || 0,
+        from: paymentData.from || '',
+        tokenAddress: paymentData.tokenAddress || ''
       };
+
 
       const protoBuffer = BLEPaymentData.encode(protoData).finish();
       const cborBuffer = cbor.encode(protoBuffer);

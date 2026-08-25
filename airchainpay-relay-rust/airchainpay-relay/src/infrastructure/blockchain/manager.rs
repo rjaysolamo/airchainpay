@@ -207,6 +207,44 @@ impl BlockchainManager {
         Ok(nonce)
     }
 
+    /// Query the `OfflineSecurityVault`'s next expected logical nonce for `sender`.
+    ///
+    /// This reads `getNextLogicalNonce(address)` from the vault deployed at
+    /// `vault_address` on `chain_id`. A minimal human-readable ABI is used so the
+    /// relay does not need to bundle the full vault ABI or add config fields; the
+    /// caller supplies the vault address (e.g. from deployment config/env).
+    pub async fn get_next_logical_nonce(
+        &self,
+        chain_id: u64,
+        vault_address: Address,
+        sender: Address,
+    ) -> Result<U256> {
+        let provider = self.providers.get(&chain_id)
+            .ok_or_else(|| anyhow!("No provider for chain_id {}", chain_id))?;
+
+        let abi = ethers::abi::parse_abi(&[
+            "function getNextLogicalNonce(address user) view returns (uint256)",
+        ]).map_err(|e| anyhow!("Failed to parse vault ABI: {}", e))?;
+
+        let contract = Contract::new(vault_address, abi, Arc::new(provider.clone()));
+        let nonce: U256 = contract.method("getNextLogicalNonce", sender)?.call().await?;
+        Ok(nonce)
+    }
+
+    /// Broadcast an already-signed raw transaction (0x-hex) to `chain_id`.
+    ///
+    /// Thin wrapper over the provider used by the sequence resolver to release a
+    /// quarantined transaction once its logical-nonce gap has been filled.
+    pub async fn broadcast_raw(&self, chain_id: u64, signed_tx_hex: &str) -> Result<H256> {
+        let provider = self.providers.get(&chain_id)
+            .ok_or_else(|| anyhow!("No provider for chain_id {}", chain_id))?;
+        let raw_tx_bytes = hex::decode(signed_tx_hex.trim_start_matches("0x"))?;
+        let pending_tx = provider.send_raw_transaction(Bytes::from(raw_tx_bytes)).await?;
+        let receipt = pending_tx.await?;
+        Ok(receipt.unwrap().transaction_hash)
+    }
+
+
     /// Get the payment typehash for EIP-712 signing
     pub async fn get_payment_typehash(&self, chain_id: u64) -> Result<H256> {
         let contract = self.get_contract(chain_id, ContractType::AirChainPay)?;

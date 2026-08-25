@@ -56,7 +56,25 @@ message BLEPaymentData {
   uint64 timestamp = 6;
   Token token = 7;
   PaymentMetadata metadata = 8;
+
+  // Logical-nonce offline payment (Module 2), settled on-chain via the
+  // OfflineSecurityVault. These fields are only populated when the sender is
+  // paying from escrow with a signed, gap-free logical nonce. Field 9 is left
+  // as the sentinel default (0) for legacy simple payments; consumers MUST
+  // treat `signature == ""` as "no offline authorization present".
+  uint64 logicalNonce = 9;
+  // EIP-712 signature over the OfflinePayment struct. Empty for legacy payments.
+  string signature = 10;
+  // Absolute Unix-seconds expiry for the offline authorization.
+  uint64 deadline = 11;
+  // Explicit sender address (escrow owner). Required to settle from escrow
+  // since the recipient submitting the tx is not the payer.
+  string from = 12;
+  // Token contract address the offline payment draws from (native = zero addr).
+  // Kept separate from `token` so settlement doesn't depend on full metadata.
+  string tokenAddress = 13;
 }
+
 
 // QR payment request
 message QRPaymentRequest {
