@@ -12,6 +12,7 @@ use std::marker::PhantomData;
 use futures_util::future::LocalBoxFuture;
 use futures::task::{Context, Poll};
 
+pub mod auth;
 pub mod error_handling;
 pub mod input_validation;
 pub mod rate_limiting;
@@ -21,6 +22,10 @@ pub mod critical_error_middleware;
 
 // Re-export security components
 pub use security::SecurityConfig;
+
+// Re-export authentication components
+pub use auth::{AuthConfig, AuthMiddleware, Role};
+
 
 // Re-export error handling components
 

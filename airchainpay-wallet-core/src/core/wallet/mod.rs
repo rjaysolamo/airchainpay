@@ -72,6 +72,64 @@ impl WalletManager {
         Ok(wallet)
     }
 
+    /// Import a wallet from a BIP39 seed phrase.
+    ///
+    /// Unlike `create_wallet` (which generates a fresh random key), this derives
+    /// the private key deterministically from `seed_phrase` using the standard
+    /// Ethereum path (m/44'/60'/0'/0/0), persists it under the wallet's key id,
+    /// and records the resulting address. This is what makes an imported wallet
+    /// actually control the same funds as the original.
+    pub async fn import_wallet(
+        &self,
+        wallet_id: &str,
+        name: &str,
+        network: Network,
+        seed_phrase: &str,
+    ) -> Result<SecureWallet, WalletError> {
+        // Initialize secure file storage and key manager
+        let file_storage = crate::infrastructure::platform::FileStorage::new()?;
+        let key_manager = crate::core::crypto::keys::KeyManager::new(&file_storage);
+
+        // Derive deterministic key id from wallet id (matches create_wallet and
+        // the sign/send paths, which look up `wallet_key_<wallet_id>`).
+        let key_id = format!("wallet_key_{}", wallet_id);
+
+        // Derive the private key from the seed phrase and persist it securely.
+        // This stores the key under `key_id` so later signing works.
+        let private_key = key_manager.derive_private_key_from_seed(seed_phrase, &key_id)?;
+        let public_key = key_manager.get_public_key(&private_key)?;
+        let address = key_manager.get_address(&public_key)?;
+
+        // Construct secure wallet entity with the derived address
+        let wallet = SecureWallet::new(
+            wallet_id.to_string(),
+            name.to_string(),
+            address,
+            network.clone(),
+        );
+
+        // Persist in manager state
+        {
+            let mut wallets = self.wallets.write().await;
+            wallets.insert(wallet_id.to_string(), SecureWallet::new(
+                wallet.id.clone(),
+                wallet.name.clone(),
+                wallet.address.clone(),
+                wallet.network.clone(),
+            ));
+        }
+
+        // Initialize balance cache with zero until on-chain fetch updates it
+        {
+            let mut balances = self.balances.write().await;
+            let currency = network.native_currency().to_string();
+            let balance = WalletBalance::new(wallet_id.to_string(), network.clone(), "0".to_string(), currency);
+            balances.insert(wallet_id.to_string(), balance);
+        }
+
+        Ok(wallet)
+    }
+
     /// Get a wallet by ID
     pub async fn get_wallet(&self, wallet_id: &str) -> Result<SecureWallet, WalletError> {
         let wallets = self.wallets.read().await;

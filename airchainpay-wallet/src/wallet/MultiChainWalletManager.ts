@@ -42,6 +42,31 @@ interface MinimalWallet {
 
 type WalletType = MinimalWallet | ethers.Wallet | ethers.HDNodeWallet;
 
+/**
+ * Thrown when no wallet has been created/imported yet. Callers should route the
+ * user to the wallet setup/import screen rather than treating this as a fatal
+ * error.
+ */
+export class NoWalletError extends Error {
+  constructor(message: string = 'No wallet found') {
+    super(message);
+    this.name = 'NoWalletError';
+  }
+}
+
+/**
+ * Thrown when a wallet exists in storage but could not be loaded (e.g. locked
+ * keychain or a transient decryption failure). Critically, the stored key is
+ * PRESERVED when this is thrown — the user's funds remain recoverable. Callers
+ * should surface a retry/re-import path and must NOT delete wallet data.
+ */
+export class WalletLoadError extends Error {
+  constructor(message: string = 'Failed to load wallet') {
+    super(message);
+    this.name = 'WalletLoadError';
+  }
+}
+
 // Add type guards for ethers.Wallet and ethers.HDNodeWallet
 function isEthersWallet(wallet: WalletType): wallet is ethers.Wallet {
   return (wallet as ethers.Wallet).connect !== undefined && typeof (wallet as ethers.Wallet).connect === 'function';
@@ -458,55 +483,73 @@ export class MultiChainWalletManager {
     }
   }
 
+  /**
+   * Load the user's existing wallet for signing/sending/balance operations.
+   *
+   * IMPORTANT: This method NEVER creates or regenerates a wallet. Wallet
+   * creation is an explicit, user-driven flow (generateSeedPhrase +
+   * confirmBackup, importFromSeedPhrase, or importFromPrivateKey) that persists
+   * the private key. Silently minting a new random wallet here was a critical
+   * fund-loss bug: a transient failure to read/instantiate the stored key would
+   * previously cause the key to be DELETED and replaced with a brand-new random
+   * wallet, permanently losing access to the user's funds.
+   *
+   * Behavior:
+   *  - returns the in-memory wallet if already loaded;
+   *  - otherwise loads it from the stored private key;
+   *  - if the stored key cannot be instantiated, throws WITHOUT deleting it
+   *    (so the funds remain recoverable, e.g. after fixing keychain access);
+   *  - if no wallet exists, throws a typed "no wallet" error. Callers should
+   *    route the user to the wallet setup/import screen.
+   *
+   * The method name is retained for backward compatibility with existing call
+   * sites, but it is strictly load-only.
+   */
   async createOrLoadWallet(): Promise<WalletType> {
     if (this.wallet) {
       logger.info('[MultiChain] Returning existing wallet');
       return this.wallet;
     }
 
+    let privateKey: string | null;
     try {
-      // Check for corrupted wallet data first
-      const wasCorrupted = await this.checkAndFixCorruptedWallet();
-      if (wasCorrupted) {
-        logger.info('[MultiChain] Corrupted wallet data was fixed, creating new wallet');
-        const wallet = ethers.Wallet.createRandom();
-        await secureStorage.setItem(STORAGE_KEYS.PRIVATE_KEY, wallet.privateKey);
-        this.wallet = wallet;
-        logger.info(`[MultiChain] Created new wallet after fixing corruption: ${wallet.address}`);
-        return wallet;
-      }
-
-      const privateKey = await secureStorage.getItem(STORAGE_KEYS.PRIVATE_KEY);
-      if (privateKey) {
-        try {
-          const wallet = new ethers.Wallet(privateKey);
-          this.wallet = wallet;
-          logger.info(`[MultiChain] Loaded existing wallet: ${wallet.address}`);
-          return wallet;
-        } catch (walletError) {
-          logger.warn('[MultiChain] Failed to create wallet from stored private key, creating new wallet:', walletError);
-          // Clear the corrupted private key
-          await secureStorage.deleteItem(STORAGE_KEYS.PRIVATE_KEY);
-          const newWallet = ethers.Wallet.createRandom();
-          await secureStorage.setItem(STORAGE_KEYS.PRIVATE_KEY, newWallet.privateKey);
-          this.wallet = newWallet;
-          logger.info(`[MultiChain] Created new wallet after private key error: ${newWallet.address}`);
-          return newWallet;
-        }
-      }
-
-      const wallet = ethers.Wallet.createRandom();
-      await secureStorage.setItem(STORAGE_KEYS.PRIVATE_KEY, wallet.privateKey);
-      this.wallet = wallet;
-      logger.info(`[MultiChain] Created new wallet: ${wallet.address}`);
-      return wallet;
+      privateKey = await secureStorage.getItem(STORAGE_KEYS.PRIVATE_KEY);
     } catch (error: unknown) {
-      if (error instanceof Error) {
-        logger.error('[MultiChain] Failed to create/load wallet:', error);
-      } else {
-        logger.error('[MultiChain] Failed to create/load wallet:', String(error));
-      }
-      throw new Error('Failed to create/load wallet');
+      // A failure to READ secure storage is transient (locked keychain, etc.).
+      // Never destroy or replace the wallet on a read error — surface it.
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error('[MultiChain] Failed to read stored private key (not regenerating):', message);
+      throw new WalletLoadError(
+        'Unable to access secure storage to load your wallet. Please try again.'
+      );
+    }
+
+    if (!privateKey) {
+      // No wallet has been set up yet. Do NOT silently create one here; wallet
+      // creation is an explicit user flow. Surface a typed error so callers can
+      // route to the setup/import screen.
+      logger.warn('[MultiChain] No wallet found; wallet must be created or imported explicitly');
+      throw new NoWalletError(
+        'No wallet found. Please create or import a wallet before performing this action.'
+      );
+    }
+
+    try {
+      const wallet = new ethers.Wallet(privateKey);
+      this.wallet = wallet;
+      logger.info(`[MultiChain] Loaded existing wallet: ${wallet.address}`);
+      return wallet;
+    } catch (walletError: unknown) {
+      // The stored key is present but could not be instantiated. This may be a
+      // transient issue or genuine corruption. Either way we MUST NOT delete it
+      // and mint a replacement — doing so would irreversibly lose the user's
+      // funds. Preserve the stored key and surface a typed error so the app can
+      // guide the user (retry, re-import, or contact support).
+      const message = walletError instanceof Error ? walletError.message : String(walletError);
+      logger.error('[MultiChain] Stored private key could not be loaded (preserving key, not regenerating):', message);
+      throw new WalletLoadError(
+        'Your saved wallet could not be loaded. Your keys have NOT been changed. Please restart the app or re-import your wallet.'
+      );
     }
   }
 

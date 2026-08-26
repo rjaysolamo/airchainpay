@@ -127,28 +127,27 @@ export default function RootLayout() {
     }
   }, [loaded]);
 
-  // Check for backup data when app starts (for app removal recovery)
+  // On startup, migrate and purge any legacy plaintext secret backups that
+  // older builds wrote to (unencrypted) AsyncStorage. Secrets now live only in
+  // Keychain/SecureStore, so there is nothing to "restore" on an ongoing basis.
   useEffect(() => {
-    const checkBackupData = async () => {
+    const purgeLegacyPlaintextBackups = async () => {
       try {
-        console.log('[App] Checking for backup data...');
-        const wasRestored = await secureStorage.checkAndRestoreBackup();
-        if (wasRestored) {
-          console.log('[App] Backup data restored successfully');
-          // Refresh auth state after restoration
+        const purgedCount = await secureStorage.migrateAndPurgeLegacyBackups();
+        if (purgedCount > 0) {
+          console.log(`[App] Migrated and purged ${purgedCount} legacy plaintext backup item(s)`);
+          // A migration may have populated secure storage; refresh auth state.
           setTimeout(() => {
             refreshAuthState();
           }, 1000);
-        } else {
-          console.log('[App] No backup data found');
         }
       } catch (error) {
-        console.error('[App] Failed to check backup data:', error);
+        console.error('[App] Failed to purge legacy plaintext backups:', error);
       }
     };
     
     if (loaded) {
-      checkBackupData();
+      purgeLegacyPlaintextBackups();
     }
   }, [loaded, refreshAuthState]);
 

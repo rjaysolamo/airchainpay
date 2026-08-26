@@ -529,22 +529,43 @@ struct ValidationRequest {
 }
 
 #[post("/auth/token")]
-async fn generate_token(
+pub async fn generate_token(
     req: web::Json<TokenRequest>,
+    config_manager: Data<Arc<DynamicConfigManager>>,
 ) -> impl Responder {
-    let api_key = std::env::var("API_KEY").unwrap_or_else(|_| "dev_api_key".to_string());
-    
-    if req.api_key != api_key {
+    // Resolve the API key and JWT secret from the *validated* configuration so
+    // that (a) there is no weak `dev_api_key` fallback and (b) the token is
+    // signed with the exact secret the auth middleware verifies against.
+    let config = config_manager.get_config().await;
+    let api_key = config.security.api_key.clone();
+    let jwt_secret = config.security.jwt_secret.clone();
+
+    // Never authenticate against an empty credential.
+    if api_key.is_empty() || jwt_secret.is_empty() {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "authentication_not_configured",
+            "message": "API_KEY and JWT_SECRET must be configured to issue tokens"
+        }));
+    }
+
+    // Constant-time comparison to avoid leaking the key via timing.
+    if !crate::domain::auth::constant_time_eq(req.api_key.as_bytes(), api_key.as_bytes()) {
         return HttpResponse::Unauthorized().json(serde_json::json!({
             "error": "Invalid API key"
         }));
     }
-    
-    // Generate JWT token
-    let token = auth::generate_jwt_token("api-client", "relay");
-    
+
+    // Presenting the API key grants an operator-scoped token.
+    let token = auth::AuthManager::generate_jwt_token_with_secret("api-client", "operator", &jwt_secret);
+    if token.is_empty() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "token_generation_failed"
+        }));
+    }
+
     HttpResponse::Ok().json(serde_json::json!({
-        "token": token
+        "token": token,
+        "token_type": "Bearer"
     }))
 }
 
@@ -1764,16 +1785,38 @@ async fn reload_configuration(
     }
 }
 
+/// Overwrite known secret fields in an exported configuration value so they are
+/// never returned over the API. Keeps the shape intact for round-tripping
+/// non-secret settings.
+fn redact_config_secrets(value: &mut serde_json::Value) {
+    const REDACTED: &str = "***REDACTED***";
+    if let Some(security) = value.get_mut("security").and_then(|s| s.as_object_mut()) {
+        for key in ["jwt_secret", "api_key"] {
+            if security.contains_key(key) {
+                security.insert(key.to_string(), serde_json::Value::String(REDACTED.to_string()));
+            }
+        }
+    }
+}
+
 #[post("/config/export")]
 async fn export_configuration(
     config_manager: Data<Arc<DynamicConfigManager>>,
 ) -> impl Responder {
     match config_manager.export_config().await {
-        Ok(config_json) => HttpResponse::Ok().json(serde_json::json!({
-            "success": true,
-            "config": serde_json::from_str::<serde_json::Value>(&config_json).unwrap_or_default(),
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        })),
+        Ok(config_json) => {
+            let mut config_value =
+                serde_json::from_str::<serde_json::Value>(&config_json).unwrap_or_default();
+            // CRITICAL: the raw export contains `security.jwt_secret` and
+            // `security.api_key`. Redact them before returning to any caller.
+            redact_config_secrets(&mut config_value);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "config": config_value,
+                "note": "Secret fields (jwt_secret, api_key) are redacted in this export.",
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
             "success": false,
             "error": format!("Failed to export configuration: {}", e),

@@ -15,12 +15,14 @@ use airchainpay_relay::utils::backup::BackupConfig;
 use airchainpay_relay::middleware::metrics::MetricsMiddleware;
 use airchainpay_relay::middleware::error_handling::ErrorHandlingMiddleware;
 use airchainpay_relay::middleware::rate_limiting::RateLimitingMiddleware;
-use airchainpay_relay::middleware::ComprehensiveSecurityMiddleware;
+use airchainpay_relay::middleware::{ComprehensiveSecurityMiddleware, AuthMiddleware, AuthConfig};
 use airchainpay_relay::api::*;
 use airchainpay_relay::api::handlers::transaction::{
     validate_inputs, simple_send_tx, get_transaction_details, 
-    get_transaction_status, get_user_transactions, get_supported_chains, get_chain_info, get_transaction_by_hash
+    get_transaction_status, get_user_transactions, get_supported_chains, get_chain_info, get_transaction_by_hash,
+    generate_token
 };
+
 use airchainpay_relay::utils::animated_ascii;
 use std::env;
 
@@ -61,6 +63,18 @@ async fn main() -> std::io::Result<()> {
         ));
     }
     log::info!("Configuration validation passed");
+
+    // Fail closed: authentication must be enforceable. If BOTH JWT and API-key
+    // validation are disabled the auth middleware would reject every request,
+    // which almost certainly indicates a misconfiguration. Refuse to start so
+    // the operator notices, rather than silently serving an unusable API.
+    if !config.security.enable_jwt_validation && !config.security.enable_api_key_validation {
+        log::error!("Both JWT and API-key validation are disabled; the /api surface would be unreachable. Enable at least one authentication method.");
+        return Err(std::io::Error::other(
+            "Invalid security configuration: at least one of ENABLE_JWT_VALIDATION or ENABLE_API_KEY_VALIDATION must be enabled",
+        ));
+    }
+
     
     // Validate contract addresses with detailed error logging
     log::info!("🔍 Validating contract addresses...");
@@ -167,7 +181,25 @@ async fn main() -> std::io::Result<()> {
         log::info!("🔒 CORS restricted to {} configured origin(s)", cors_allowed_origins.len());
     }
 
+    // Snapshot the authentication settings once. These are cloned into each
+    // worker to construct the per-worker `AuthMiddleware`. The middleware fails
+    // closed, and `/api/auth/token` is exempt so clients can obtain a JWT.
+    let auth_config = AuthConfig {
+        enable_jwt_validation: config.security.enable_jwt_validation,
+        enable_api_key_validation: config.security.enable_api_key_validation,
+        jwt_secret: config.security.jwt_secret.clone(),
+        api_key: config.security.api_key.clone(),
+        operator_only_prefixes: AuthConfig::default_operator_prefixes(),
+        exempt_paths: AuthConfig::default_exempt_paths(),
+    };
+    log::info!(
+        "🔐 API authentication enabled (jwt: {}, api_key: {}); administrative endpoints require operator role",
+        auth_config.enable_jwt_validation,
+        auth_config.enable_api_key_validation
+    );
+
     HttpServer::new(move || {
+
         // Construct a fresh CORS middleware per worker from the resolved policy.
         let mut cors = actix_cors::Cors::default()
             .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
@@ -222,11 +254,17 @@ async fn main() -> std::io::Result<()> {
                     .wrap(ErrorHandlingMiddleware::new(
                         Arc::clone(&error_handler)
                     ))
+                    // Authentication runs just inside rate limiting: floods are
+                    // shed first, then credentials are checked before any
+                    // business logic. `/api/auth/token` is exempt.
+                    .wrap(AuthMiddleware::new(auth_config.clone()))
                     .wrap(RateLimitingMiddleware::new(
                         100, // 100 requests per window
                         10,  // 10 burst requests
                         std::time::Duration::from_secs(60) // 1 minute window
                     ))
+                    // Token minting endpoint (exempt from auth; still rate limited).
+                    .service(generate_token)
                     .service(submit_transaction)
                     .service(legacy_submit_transaction)
                     .service(test_transaction)

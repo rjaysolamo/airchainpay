@@ -205,27 +205,23 @@ impl WalletCore {
         Ok(Wallet::from(secure_wallet))
     }
 
+    /// Import a wallet from a BIP39 seed phrase.
+    ///
+    /// This deterministically derives the private key from `seed_phrase` and
+    /// persists it under the new wallet's key id, so the imported wallet
+    /// controls the same address/funds as the original. (Previously this method
+    /// derived a key, discarded it, and then generated an unrelated random
+    /// wallet — meaning imports never recovered the user's actual account.)
     pub async fn import_wallet(&self, seed_phrase: &str) -> Result<Wallet, WalletError> {
-        use bip39::{Mnemonic};
-        use bip32::{XPrv, DerivationPath, Seed};
-        use std::str::FromStr;
-        let mnemonic = Mnemonic::parse(seed_phrase)
-            .map_err(|e| WalletError::validation(format!("Invalid seed phrase: {}", e)))?;
-        let seed_bytes = mnemonic.to_seed("");
-        let seed = Seed::new(seed_bytes); 
-        let xprv = XPrv::new(seed.as_bytes())
-            .map_err(|e| WalletError::crypto(format!("Failed to create XPrv: {}", e)))?;
-        let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0")
-            .map_err(|e| WalletError::crypto(format!("Invalid derivation path: {}", e)))?;
-        let mut child_xprv = xprv;
-        for child_number in derivation_path.into_iter() {
-            child_xprv = child_xprv.derive_child(child_number)
-                .map_err(|e| WalletError::crypto(format!("Failed to derive child XPrv: {}", e)))?;
-        }
-        let _private_key_bytes = child_xprv.private_key().to_bytes();
+        // Validate the seed phrase up front for a clear error message.
+        crate::shared::utils::validate_seed_phrase(seed_phrase)?;
+
         let wallet_id = format!("wallet_{}", uuid::Uuid::new_v4());
         let network = Network::CoreTestnet;
-        let wallet = self.wallet_manager.create_wallet(&wallet_id, "Imported Wallet", network).await?;
+        let wallet = self
+            .wallet_manager
+            .import_wallet(&wallet_id, "Imported Wallet", network, seed_phrase)
+            .await?;
         Ok(Wallet::from(wallet))
     }
 
@@ -275,4 +271,40 @@ mod tests {
             .expect("Failed to create test wallet");
         assert_eq!(wallet.name, "Test Wallet");
     }
-} 
+
+    /// Regression test for the previously-broken import path.
+    ///
+    /// The canonical BIP39 test mnemonic derives, at the standard Ethereum path
+    /// m/44'/60'/0'/0/0, to the well-known address
+    /// 0x9858EfFD232B4033E47d90003D41EC34EcaEda94. Importing must reproduce
+    /// exactly this address (deterministic derivation) rather than a random one.
+    #[tokio::test]
+    async fn test_import_wallet_is_deterministic_and_correct() {
+        let core = init_wallet_core().await
+            .expect("Failed to initialize wallet core");
+
+        let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+        let wallet = core.import_wallet(seed_phrase).await
+            .expect("Failed to import wallet from seed phrase");
+
+        assert_eq!(
+            wallet.address.to_lowercase(),
+            "0x9858effd232b4033e47d90003d41ec34ecaeda94",
+            "imported address must match the BIP39/Ethereum test vector"
+        );
+
+        // Importing the same seed again must yield the same address.
+        let wallet2 = core.import_wallet(seed_phrase).await
+            .expect("Failed to import wallet from seed phrase (second time)");
+        assert_eq!(wallet.address.to_lowercase(), wallet2.address.to_lowercase());
+    }
+
+    #[tokio::test]
+    async fn test_import_wallet_rejects_invalid_seed_phrase() {
+        let core = init_wallet_core().await
+            .expect("Failed to initialize wallet core");
+        let result = core.import_wallet("not a valid bip39 mnemonic at all").await;
+        assert!(result.is_err(), "invalid seed phrase must be rejected");
+    }
+}

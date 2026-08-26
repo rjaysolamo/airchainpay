@@ -59,9 +59,21 @@ impl AuthManager {
         })
     }
 
-    /// Generate a JWT token
+    /// Generate a JWT token using the ambient (env-derived) secret.
+    ///
+    /// Prefer [`generate_jwt_token_with_secret`] with the secret resolved from
+    /// `config.security.jwt_secret` so that signing and verification always use
+    /// the same key. This variant is retained for backward compatibility.
     pub fn generate_jwt_token(subject: &str, token_type: &str) -> String {
         let secret = Self::get_or_generate_jwt_secret();
+        Self::generate_jwt_token_with_secret(subject, token_type, &secret)
+    }
+
+    /// Generate a JWT token signed with an explicit secret.
+    ///
+    /// The secret MUST be the same value used for verification (see
+    /// [`verify_jwt_token_with_secret`]). Never log the secret.
+    pub fn generate_jwt_token_with_secret(subject: &str, token_type: &str, secret: &str) -> String {
         let now = Utc::now();
         let exp = now + Duration::hours(24); // 24 hour expiration
 
@@ -79,16 +91,23 @@ impl AuthManager {
         ) {
             Ok(token) => token,
             Err(e) => {
+                // Do not log the secret or claims; only the error kind.
                 println!("Failed to generate JWT token: {e}");
                 String::new()
             }
         }
     }
 
-    /// Verify a JWT token
+    /// Verify a JWT token using the ambient (env-derived) secret.
+    ///
+    /// Prefer [`verify_jwt_token_with_secret`] with the configured secret.
     pub fn verify_jwt_token(token: &str) -> Result<Claims, Box<dyn std::error::Error>> {
         let secret = Self::get_or_generate_jwt_secret();
-        
+        Self::verify_jwt_token_with_secret(token, &secret)
+    }
+
+    /// Verify a JWT token against an explicit secret.
+    pub fn verify_jwt_token_with_secret(token: &str, secret: &str) -> Result<Claims, Box<dyn std::error::Error>> {
         let token_data = decode::<Claims>(
             token,
             &DecodingKey::from_secret(secret.as_ref()),
@@ -133,6 +152,22 @@ impl AuthManager {
     }
 
 
+}
+
+/// Constant-time byte-slice equality.
+///
+/// Used to compare secrets (API keys) without leaking their contents through
+/// early-exit timing. Returns `false` immediately on length mismatch; the
+/// remaining comparison is branch-free over the shorter slice's length.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // Public function for generating JWT tokens (used by API endpoints)

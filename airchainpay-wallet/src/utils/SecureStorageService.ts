@@ -5,10 +5,21 @@ import { logger } from './Logger';
 
 /**
  * Secure Storage Service
- * 
- * Implements hardware-backed storage using react-native-keychain with fallback to expo-secure-store.
- * Also includes AsyncStorage backup to preserve wallet data when app is removed from screen.
- * Provides maximum security for sensitive wallet data including private keys and seed phrases.
+ *
+ * Implements hardware-backed storage using react-native-keychain with fallback
+ * to expo-secure-store. Provides maximum security for sensitive wallet data
+ * including private keys and seed phrases.
+ *
+ * SECURITY NOTE: This service intentionally does NOT mirror secrets into
+ * AsyncStorage. AsyncStorage is an UNENCRYPTED key/value store; writing private
+ * keys or seed phrases there (previously done as a "backup_<key>" copy) exposed
+ * them in plaintext to anyone with filesystem/backup access. Keychain and
+ * SecureStore already persist across app backgrounding, so the plaintext mirror
+ * provided no real durability benefit while creating a critical vulnerability.
+ *
+ * For backward compatibility, reads will transparently MIGRATE any legacy
+ * plaintext `backup_<key>` value into secure storage and then DELETE the
+ * plaintext copy (self-healing cleanup for existing installs).
  */
 export class SecureStorageService {
   private static instance: SecureStorageService;
@@ -140,12 +151,15 @@ export class SecureStorageService {
         logger.info(`[SecureStorage] Stored ${key} in SecureStore (fallback)`);
       }
 
-      // Always backup to AsyncStorage for app removal protection
+      // SECURITY: Do NOT mirror the value into AsyncStorage. AsyncStorage is
+      // unencrypted; a plaintext copy of a private key / seed phrase there is a
+      // critical vulnerability. Keychain/SecureStore already survive app
+      // backgrounding and reinstalls (iOS Keychain), so no plaintext "backup"
+      // is needed. Proactively remove any legacy plaintext copy for this key.
       try {
-        await AsyncStorage.setItem(`backup_${key}`, value);
-        logger.info(`[SecureStorage] Backed up ${key} to AsyncStorage`);
-      } catch (backupError) {
-        logger.warn(`[SecureStorage] Failed to backup ${key} to AsyncStorage:`, backupError);
+        await AsyncStorage.removeItem(`backup_${key}`);
+      } catch (cleanupError) {
+        logger.warn(`[SecureStorage] Failed to remove legacy plaintext backup for ${key}:`, cleanupError);
       }
     } catch (error) {
       logger.error(`[SecureStorage] Failed to store ${key}:`, error);
@@ -204,24 +218,33 @@ export class SecureStorageService {
         logger.info(`[SecureStorage] Key ${key} not found in SecureStore, trying backup`);
       }
 
-      // Try to recover from AsyncStorage backup
+      // Legacy migration path: older builds mirrored secrets into a plaintext
+      // `backup_<key>` AsyncStorage entry. If present, migrate it into secure
+      // storage and DELETE the plaintext copy so the secret no longer lives in
+      // an unencrypted store.
       try {
-        const backupValue = await AsyncStorage.getItem(`backup_${key}`);
-        if (backupValue) {
-          logger.info(`[SecureStorage] Recovered ${key} from AsyncStorage backup`);
-          
-          // Restore to primary storage
+        const legacyValue = await AsyncStorage.getItem(`backup_${key}`);
+        if (legacyValue) {
+          logger.warn(`[SecureStorage] Found legacy plaintext backup for ${key}; migrating to secure storage and deleting plaintext copy`);
+
+          // Restore to primary (secure) storage. setItem() also removes the
+          // plaintext backup, but we delete explicitly below to be certain.
           try {
-            await this.setItem(key, backupValue);
-            logger.info(`[SecureStorage] Restored ${key} to primary storage`);
+            await this.setItem(key, legacyValue);
           } catch (restoreError) {
-            logger.warn(`[SecureStorage] Failed to restore ${key} to primary storage:`, restoreError);
+            logger.warn(`[SecureStorage] Failed to migrate ${key} to secure storage:`, restoreError);
           }
-          
-          return backupValue;
+
+          try {
+            await AsyncStorage.removeItem(`backup_${key}`);
+          } catch (removeError) {
+            logger.warn(`[SecureStorage] Failed to delete legacy plaintext backup for ${key}:`, removeError);
+          }
+
+          return legacyValue;
         }
       } catch (backupError) {
-        logger.warn(`[SecureStorage] Failed to check backup for ${key}:`, backupError);
+        logger.warn(`[SecureStorage] Failed to check legacy backup for ${key}:`, backupError);
       }
       
       return null;
@@ -545,46 +568,69 @@ export class SecureStorageService {
   }
 
   /**
-   * Check if backup data exists and restore it
-   * This is called when the app is reopened after being removed from the screen
+   * Migrate and purge any legacy plaintext `backup_<key>` entries.
+   *
+   * Older builds mirrored secrets into unencrypted AsyncStorage. This method
+   * (invoked on app start) sweeps those legacy entries: each value is written
+   * into secure storage (if not already present) and the plaintext copy is
+   * deleted. It no longer "restores" anything on an ongoing basis because
+   * secrets are never written to AsyncStorage anymore.
+   *
+   * @returns the number of legacy plaintext entries that were purged.
    */
-  async checkAndRestoreBackup(): Promise<boolean> {
+  async migrateAndPurgeLegacyBackups(): Promise<number> {
     try {
-      logger.info('[SecureStorage] Checking for backup data...');
-      
-      // Check if we have any backup data in AsyncStorage
+      logger.info('[SecureStorage] Sweeping for legacy plaintext backups...');
+
       const keys = await AsyncStorage.getAllKeys();
       const backupKeys = keys.filter(key => key.startsWith('backup_'));
-      
+
       if (backupKeys.length === 0) {
-        logger.info('[SecureStorage] No backup data found');
-        return false;
+        logger.info('[SecureStorage] No legacy plaintext backups found');
+        return 0;
       }
-      
-      logger.info(`[SecureStorage] Found ${backupKeys.length} backup items`);
-      
-      // Restore each backup item
-      let restoredCount = 0;
+
+      logger.warn(`[SecureStorage] Found ${backupKeys.length} legacy plaintext backup item(s); migrating to secure storage and purging`);
+
+      let purgedCount = 0;
       for (const backupKey of backupKeys) {
         try {
           const value = await AsyncStorage.getItem(backupKey);
+          const originalKey = backupKey.replace('backup_', '');
+
           if (value) {
-            const originalKey = backupKey.replace('backup_', '');
-            await this.setItem(originalKey, value);
-            restoredCount++;
-            logger.info(`[SecureStorage] Restored ${originalKey} from backup`);
+            // Only write to secure storage if it isn't already there, to avoid
+            // overwriting a newer secret with a stale plaintext copy.
+            const existing = await this.getItem(originalKey);
+            if (!existing) {
+              await this.setItem(originalKey, value);
+              logger.info(`[SecureStorage] Migrated legacy ${originalKey} into secure storage`);
+            }
           }
-        } catch (restoreError) {
-          logger.warn(`[SecureStorage] Failed to restore ${backupKey}:`, restoreError);
+
+          await AsyncStorage.removeItem(backupKey);
+          purgedCount++;
+        } catch (purgeError) {
+          logger.warn(`[SecureStorage] Failed to migrate/purge ${backupKey}:`, purgeError);
         }
       }
-      
-      logger.info(`[SecureStorage] Successfully restored ${restoredCount} items from backup`);
-      return restoredCount > 0;
+
+      logger.info(`[SecureStorage] Purged ${purgedCount} legacy plaintext backup item(s)`);
+      return purgedCount;
     } catch (error) {
-      logger.error('[SecureStorage] Failed to check and restore backup:', error);
-      return false;
+      logger.error('[SecureStorage] Failed to migrate/purge legacy backups:', error);
+      return 0;
     }
+  }
+
+  /**
+   * @deprecated Retained for backward compatibility. Secrets are no longer
+   * mirrored to AsyncStorage; this now simply purges any legacy plaintext
+   * backups. Returns true if at least one legacy entry was purged.
+   */
+  async checkAndRestoreBackup(): Promise<boolean> {
+    const purged = await this.migrateAndPurgeLegacyBackups();
+    return purged > 0;
   }
 
   /**
@@ -606,86 +652,47 @@ export class SecureStorageService {
   }
 
   /**
-   * Test backup functionality
-   * This is for development/testing purposes only
+   * Regression check: storing a value must NOT leave a plaintext copy in
+   * AsyncStorage. Verifies the value round-trips through secure storage while
+   * confirming no `backup_<key>` plaintext entry is created.
+   *
+   * This is for development/testing purposes only.
    */
-  async testBackupFunctionality(): Promise<boolean> {
+  async testNoPlaintextLeak(): Promise<boolean> {
+    const testKey = 'test_backup_key';
+    const testValue = 'test_backup_value_' + Date.now();
     try {
-      logger.info('[SecureStorage] Testing backup functionality...');
-      
-      // Test data
-      const testKey = 'test_backup_key';
-      const testValue = 'test_backup_value_' + Date.now();
-      
-      // Store test data
-      await this.setItem(testKey, testValue);
-      logger.info('[SecureStorage] Test data stored');
-      
-      // Verify it's in primary storage
-      const primaryValue = await this.getItem(testKey);
-      if (primaryValue !== testValue) {
-        logger.error('[SecureStorage] Test failed: Primary storage value mismatch');
-        return false;
-      }
-      
-      // Verify it's in backup
-      const backupValue = await AsyncStorage.getItem(`backup_${testKey}`);
-      if (backupValue !== testValue) {
-        logger.error('[SecureStorage] Test failed: Backup value mismatch');
-        return false;
-      }
-      
-      // Clear test data
-      await this.deleteItem(testKey);
-      logger.info('[SecureStorage] Test data cleared');
-      
-      logger.info('[SecureStorage] Backup functionality test passed');
-      return true;
-    } catch (error) {
-      logger.error('[SecureStorage] Backup functionality test failed:', error);
-      return false;
-    }
-  }
+      logger.info('[SecureStorage] Testing that secrets are not leaked to AsyncStorage...');
 
-  /**
-   * Test offline wallet creation
-   * This is for development/testing purposes only
-   */
-  async testOfflineWalletCreation(): Promise<boolean> {
-    try {
-      logger.info('[SecureStorage] Testing offline wallet creation...');
-      
-      // Test data
-      const testKey = 'test_offline_wallet';
-      const testValue = 'test_offline_wallet_value_' + Date.now();
-      
       // Store test data
       await this.setItem(testKey, testValue);
-      logger.info('[SecureStorage] Test offline wallet data stored');
-      
-      // Verify it's in primary storage
+
+      // Verify it round-trips through secure storage
       const primaryValue = await this.getItem(testKey);
       if (primaryValue !== testValue) {
-        logger.error('[SecureStorage] Test failed: Primary storage value mismatch');
+        logger.error('[SecureStorage] Test failed: secure storage value mismatch');
         return false;
       }
-      
-      // Verify it's in backup
-      const backupValue = await AsyncStorage.getItem(`backup_${testKey}`);
-      if (backupValue !== testValue) {
-        logger.error('[SecureStorage] Test failed: Backup value mismatch');
+
+      // CRITICAL: there must be NO plaintext copy in AsyncStorage
+      const leaked = await AsyncStorage.getItem(`backup_${testKey}`);
+      if (leaked !== null) {
+        logger.error('[SecureStorage] Test failed: plaintext copy found in AsyncStorage (security regression)');
         return false;
       }
-      
-      // Clear test data
-      await this.deleteItem(testKey);
-      logger.info('[SecureStorage] Test offline wallet data cleared');
-      
-      logger.info('[SecureStorage] Offline wallet creation test passed');
+
+      logger.info('[SecureStorage] No-plaintext-leak test passed');
       return true;
     } catch (error) {
-      logger.error('[SecureStorage] Offline wallet creation test failed:', error);
+      logger.error('[SecureStorage] No-plaintext-leak test failed:', error);
       return false;
+    } finally {
+      // Always clean up test data
+      try {
+        await this.deleteItem(testKey);
+      } catch {
+        // best-effort cleanup
+      }
     }
   }
 }
