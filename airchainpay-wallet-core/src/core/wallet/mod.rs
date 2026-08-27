@@ -15,6 +15,74 @@ pub struct WalletManager {
     balances: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, WalletBalance>>>,
 }
 
+/// Resolve the JSON-RPC URL for a network, honoring environment overrides and
+/// falling back to the network's built-in default where one exists.
+///
+/// Extracted so both `WalletManager::get_balance` and stateless callers (such
+/// as the FFI boundary) share a single implementation.
+pub(crate) fn resolve_rpc_url(network: &Network) -> Result<String, WalletError> {
+    let url = match network {
+        Network::CoreTestnet => std::env::var("WALLET_CORE_RPC_CORE_TESTNET")
+            .unwrap_or_else(|_| Network::CoreTestnet.rpc_url().to_string()),
+        Network::BaseSepolia => std::env::var("WALLET_CORE_RPC_BASE_SEPOLIA")
+            .unwrap_or_else(|_| Network::BaseSepolia.rpc_url().to_string()),
+        Network::LiskSepolia => std::env::var("WALLET_CORE_RPC_LISK_SEPOLIA")
+            .map_err(|_| WalletError::config("RPC URL not set for Lisk Sepolia"))?,
+        Network::EthereumHolesky => std::env::var("WALLET_CORE_RPC_HOLESKY")
+            .map_err(|_| WalletError::config("RPC URL not set for Holesky"))?,
+    };
+    Ok(url)
+}
+
+/// Query the native-coin balance for `address` on `network` via `eth_getBalance`.
+///
+/// This is intentionally **stateless**: it depends only on its arguments and
+/// therefore does NOT require an in-memory wallet map. The FFI balance entry
+/// point calls this directly, fixing the previous bug where a freshly-created,
+/// empty `WalletManager` always returned `WalletNotFound`.
+pub(crate) async fn fetch_native_balance(
+    address: &str,
+    network: &Network,
+) -> Result<String, WalletError> {
+    let rpc_url = resolve_rpc_url(network)?;
+
+    let client = Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBalance",
+        "params": [address, "latest"],
+        "id": 1
+    });
+    let resp = client
+        .post(&rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| WalletError::network(format!("Failed to query balance: {}", e)))?;
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| WalletError::network(format!("Invalid balance response: {}", e)))?;
+
+    let hex_balance = resp_json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WalletError::network("Missing balance result".to_string()))?;
+
+    // Convert 0x hex to a decimal string. Invalid hex is now surfaced as an
+    // error instead of being silently swallowed (the previous code used
+    // `unwrap_or_default()`, which turned a malformed response into "0").
+    let clean = hex_balance.trim_start_matches("0x");
+    let value = if clean.is_empty() {
+        U256::zero()
+    } else {
+        let bytes = hex::decode(clean)
+            .map_err(|e| WalletError::network(format!("Invalid balance hex: {}", e)))?;
+        U256::from_big_endian(&bytes)
+    };
+    Ok(value.to_string())
+}
+
 impl WalletManager {
     pub fn new() -> Self {
         Self {
@@ -154,52 +222,8 @@ impl WalletManager {
             (wallet.address.clone(), wallet.network.clone())
         };
 
-        // Resolve RPC URL via env override or network defaults
-        let rpc_url = match network {
-            Network::CoreTestnet => std::env::var("WALLET_CORE_RPC_CORE_TESTNET")
-                .unwrap_or_else(|_| Network::CoreTestnet.rpc_url().to_string()),
-            Network::BaseSepolia => std::env::var("WALLET_CORE_RPC_BASE_SEPOLIA")
-                .unwrap_or_else(|_| Network::BaseSepolia.rpc_url().to_string()),
-            Network::LiskSepolia => std::env::var("WALLET_CORE_RPC_LISK_SEPOLIA")
-                .map_err(|_| WalletError::config("RPC URL not set for Lisk Sepolia"))?,
-            Network::EthereumHolesky => std::env::var("WALLET_CORE_RPC_HOLESKY")
-                .map_err(|_| WalletError::config("RPC URL not set for Holesky"))?,
-        };
-
-        // Query eth_getBalance
-        let client = Client::new();
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "eth_getBalance",
-            "params": [address, "latest"],
-            "id": 1
-        });
-        let resp = client
-            .post(&rpc_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| WalletError::network(format!("Failed to query balance: {}", e)))?;
-        let resp_json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| WalletError::network(format!("Invalid balance response: {}", e)))?;
-
-        let hex_balance = resp_json
-            .get("result")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| WalletError::network("Missing balance result".to_string()))?;
-
-        // Convert 0x hex to decimal string using U256
-        let dec_balance = {
-            let clean = hex_balance.trim_start_matches("0x");
-            let bytes = hex::decode(clean).unwrap_or_default();
-            let mut val = U256::zero();
-            if !bytes.is_empty() {
-                val = U256::from_big_endian(&bytes);
-            }
-            val.to_string()
-        };
+        // Query the balance via the shared, stateless helper (no in-memory map).
+        let dec_balance = fetch_native_balance(&address, &network).await?;
 
         // Update cache
         {
@@ -330,4 +354,12 @@ mod tests {
         let result = manager.get_wallet("nonexistent_wallet").await;
         assert!(result.is_err());
     }
-} 
+
+    /// `resolve_rpc_url` must yield a usable URL for networks that ship a
+    /// built-in default (Core Testnet / Base Sepolia) regardless of env state.
+    #[test]
+    fn resolve_rpc_url_uses_defaults_for_known_networks() {
+        assert!(resolve_rpc_url(&Network::CoreTestnet).unwrap().starts_with("http"));
+        assert!(resolve_rpc_url(&Network::BaseSepolia).unwrap().starts_with("http"));
+    }
+}

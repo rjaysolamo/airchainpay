@@ -12,6 +12,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::OnceLock;
 use crate::domain::Wallet;
 use crate::shared::types::Network;
 use crate::shared::error::WalletError;
@@ -124,13 +125,35 @@ fn validate_text_input(input: *const c_char, max_length: usize) -> Result<String
     Ok(input_str.to_string())
 }
 
-/// Validate network ID
+/// Validate network ID.
+///
+/// Covers every variant of `shared::types::Network` so that the FFI boundary
+/// accepts exactly the chains the core actually supports (previously Lisk
+/// Sepolia and Ethereum Holesky were silently rejected here even though the
+/// rest of the core handles them).
 fn validate_network(network: i32) -> Result<Network, WalletError> {
     match network {
         1114 => Ok(Network::CoreTestnet),
         84532 => Ok(Network::BaseSepolia),
+        4202 => Ok(Network::LiskSepolia),
+        17000 => Ok(Network::EthereumHolesky),
         _ => Err(WalletError::validation("Unsupported network".to_string())),
     }
+}
+
+/// Shared, lazily-initialized multi-threaded Tokio runtime for FFI calls.
+///
+/// The previous balance implementation built a brand-new `Runtime` on every
+/// call, which is expensive and can exhaust OS threads/file descriptors under
+/// load. We build one runtime on first use and reuse it for all subsequent
+/// async FFI calls.
+fn ffi_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    if let Some(rt) = RUNTIME.get() {
+        return Some(rt);
+    }
+    let rt = tokio::runtime::Runtime::new().ok()?;
+    Some(RUNTIME.get_or_init(|| rt))
 }
 
 /// Create a new wallet with secure key management
@@ -314,26 +337,50 @@ pub extern "C" fn wallet_core_sign_message(
     SecureResult::success(signature)
 }
 
-/// Get wallet balance (real on-chain query)
+/// Get an address's native-coin balance on a given network (real on-chain query).
+///
+/// CORRECTNESS: this is now a **stateless** query. It takes the wallet's public
+/// `address` and `network` — both of which are returned to the caller in the
+/// `WalletInfo` JSON from `wallet_core_create_wallet` / `wallet_core_import_wallet`
+/// — and queries the chain directly via the shared `fetch_native_balance` helper.
+///
+/// This fixes the previous bug where the function constructed a fresh, empty
+/// `WalletManager` on every call and then looked the wallet up in its in-memory
+/// map. That lookup could never succeed: the map was always empty, and the
+/// caller's `wallet_id` was an unrelated UUID that was never correlated with the
+/// stored key id — so every balance query failed with `WalletNotFound`. It also
+/// no longer spins up a new Tokio runtime per call.
 #[no_mangle]
 pub extern "C" fn wallet_core_get_balance(
-    wallet_id: *const c_char,
+    address: *const c_char,
+    network: i32,
 ) -> SecureResult {
-    // Validate input
-    let wallet_id_str = match validate_input(wallet_id, 100) {
+    // Validate the address. It is a public value (not a secret), so we accept
+    // standard hex characters and then verify the canonical 0x + 40-hex shape.
+    let address_str = match validate_input(address, 64) {
         Ok(s) => s,
         Err(_) => return SecureResult::error(1), // Invalid input
     };
+    let is_valid_address = address_str.len() == 42
+        && address_str.starts_with("0x")
+        && address_str[2..].chars().all(|c| c.is_ascii_hexdigit());
+    if !is_valid_address {
+        return SecureResult::error(1); // Invalid input (malformed address)
+    }
 
-    // Use a local runtime to call async balance method without exposing runtime externally
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(_) => return SecureResult::error(15), // Runtime creation failed
+    let network_enum = match validate_network(network) {
+        Ok(n) => n,
+        Err(_) => return SecureResult::error(2), // Invalid network
+    };
+
+    // Reuse the shared runtime instead of building a new one per call.
+    let rt = match ffi_runtime() {
+        Some(rt) => rt,
+        None => return SecureResult::error(15), // Runtime unavailable
     };
 
     let result = rt.block_on(async {
-        let manager = crate::core::wallet::WalletManager::new();
-        manager.get_balance(&wallet_id_str).await
+        crate::core::wallet::fetch_native_balance(&address_str, &network_enum).await
     });
 
     match result {
@@ -431,4 +478,35 @@ pub extern "C" fn wallet_core_free_result(result: *mut SecureResult) {
             }
         }
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The FFI network mapping must cover every supported chain id. This guards
+    /// against the balance/create paths silently rejecting valid networks.
+    #[test]
+    fn validate_network_maps_all_supported_chain_ids() {
+        assert!(matches!(validate_network(1114), Ok(Network::CoreTestnet)));
+        assert!(matches!(validate_network(84532), Ok(Network::BaseSepolia)));
+        assert!(matches!(validate_network(4202), Ok(Network::LiskSepolia)));
+        assert!(matches!(validate_network(17000), Ok(Network::EthereumHolesky)));
+    }
+
+    #[test]
+    fn validate_network_rejects_unknown_chain_id() {
+        assert!(validate_network(0).is_err());
+        assert!(validate_network(1).is_err());
+        assert!(validate_network(999999).is_err());
+    }
+
+    /// The shared runtime must be reusable and return the *same* instance on
+    /// repeated calls (i.e. we are not rebuilding a runtime per call anymore).
+    #[test]
+    fn ffi_runtime_is_shared_across_calls() {
+        let a = ffi_runtime().expect("runtime should initialize");
+        let b = ffi_runtime().expect("runtime should be reused");
+        assert!(std::ptr::eq(a, b), "ffi_runtime must return the same shared instance");
+    }
+}

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use ethers::types::Transaction;
+use ethers::types::{Transaction, U256};
 use ethers::core::utils::rlp::{Rlp, Decodable};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,9 +82,18 @@ impl TransactionValidator {
             result.errors.push(format!("Rate limit exceeded: {e}"));
         }
         
-        // Validate transaction amount if we can extract it
-        if let Some(amount_str) = self.extract_amount_from_transaction(signed_tx) {
-            if let Err(e) = self.validate_transaction_amount(&amount_str) {
+        // Validate native transfer amount ONLY for plain native-value transfers.
+        //
+        // Contract interactions (ERC-20 transfers, executeMetaTransaction, pay(),
+        // ...) carry calldata and — for token/meta flows — a zero native value.
+        // Their amount is encoded in calldata and enforced by the target
+        // contract, so range-checking `tx.value` is both meaningless and, as it
+        // previously did, wrongly rejected EVERY zero-value token/meta transaction
+        // as "amount too small". `validate_amount_for_tx` encapsulates this rule:
+        // it accepts any contract call (calldata present) — including zero-value
+        // ones — and only range-checks genuine native transfers.
+        if let Ok(tx) = self.decode_transaction(signed_tx) {
+            if let Err(e) = Self::validate_amount_for_tx(&tx) {
                 result.valid = false;
                 result.errors.push(format!("Invalid transaction amount: {e}"));
             }
@@ -290,48 +299,166 @@ impl TransactionValidator {
         self.decode_transaction(signed_tx).ok().and_then(|tx| tx.chain_id).map(|id| id.as_u64()).or(Some(self.config.chain_id))
     }
 
-    fn extract_amount_from_transaction(&self, signed_tx: &str) -> Option<String> {
-        self.decode_transaction(signed_tx).ok().map(|tx| tx.value.to_string())
+    /// Single entry point deciding whether a decoded transaction's amount should
+    /// be range-checked, and performing the check when appropriate.
+    ///
+    /// Payment model:
+    ///  - **Contract interactions (calldata present)** — ERC-20 `transfer`,
+    ///    `executeMetaTransaction`, `pay()`, ... — are ACCEPTED without native
+    ///    amount validation. The transferred amount lives in calldata and is
+    ///    enforced by the target contract, so a **zero native value is valid for
+    ///    contract calls** (exactly the token/meta case that used to be rejected).
+    ///  - A zero-value, no-calldata transaction transfers nothing natively, so
+    ///    there is nothing to range-check → accepted.
+    ///  - Only a *plain native-value transfer* (no calldata, non-zero value) is
+    ///    range-checked against the dust/sanity bounds.
+    fn validate_amount_for_tx(tx: &Transaction) -> Result<()> {
+        if Self::is_native_value_transfer(tx) {
+            Self::validate_native_value(tx.value)
+        } else {
+            Ok(())
+        }
     }
 
-    /// Validate transaction amount using ethereum validation functions
-    fn validate_transaction_amount(&self, amount_str: &str) -> Result<()> {
-        use crate::infrastructure::blockchain::ethereum;
-        
-        // Try to parse as ether first
-        match ethereum::parse_ether(amount_str) {
-            Ok(amount) => {
-                // Check if amount is reasonable (between 0.000001 and 1000 ETH)
-                let min_amount = ethereum::parse_ether("0.000001").unwrap_or_default();
-                let max_amount = ethereum::parse_ether("1000").unwrap_or_default();
-                
-                if amount < min_amount {
-                    return Err(anyhow!("Amount too small: {}", amount_str));
-                }
-                if amount > max_amount {
-                    return Err(anyhow!("Amount too large: {}", amount_str));
-                }
-                Ok(())
-            },
-            Err(_) => {
-                // Try to parse as wei
-                match ethereum::parse_wei(amount_str) {
-                    Ok(amount) => {
-                        // Check if amount is reasonable (between 1 wei and 1000 ETH in wei)
-                        let min_amount = ethereum::parse_wei("1").unwrap_or_default();
-                        let max_amount = ethereum::parse_wei("1000000000000000000000").unwrap_or_default(); // 1000 ETH in wei
-                        
-                        if amount < min_amount {
-                            return Err(anyhow!("Amount too small: {}", amount_str));
-                        }
-                        if amount > max_amount {
-                            return Err(anyhow!("Amount too large: {}", amount_str));
-                        }
-                        Ok(())
-                    },
-                    Err(_) => Err(anyhow!("Invalid amount format: {}", amount_str))
-                }
-            }
+    /// Returns true only for a *plain native-value transfer*: a transaction that
+    /// carries no calldata (`input` empty) and moves a non-zero native `value`.
+    ///
+    /// Presence of calldata (`data`) is treated as a contract interaction; such
+    /// transactions (including zero-value ones) skip native amount validation.
+    /// This is the fix for the bug where every zero-native-value transaction
+    /// (i.e. all token and meta-transactions) was rejected as "amount too small".
+    fn is_native_value_transfer(tx: &Transaction) -> bool {
+        tx.input.0.is_empty() && !tx.value.is_zero()
+    }
+
+    /// Range-check the native `value` (in wei) of a plain native transfer.
+    ///
+    /// `tx.value` is always denominated in wei, so bounds are computed in wei
+    /// directly (the previous implementation mistakenly parsed the wei value as
+    /// ether, which made legitimate transfers fail as "too large" and zero-value
+    /// contract calls fail as "too small"). Bounds preserve the original intent:
+    /// min 0.000001 ETH (dust guard) and max 1000 ETH (sanity cap).
+    fn validate_native_value(value: U256) -> Result<()> {
+        let wei_per_eth = U256::from(10u64).pow(U256::from(18u64));
+        let min_wei = wei_per_eth / U256::from(1_000_000u64); // 0.000001 ETH
+        let max_wei = wei_per_eth * U256::from(1_000u64);      // 1000 ETH
+
+        if value < min_wei {
+            return Err(anyhow!("Native amount too small: {} wei", value));
         }
+        if value > max_wei {
+            return Err(anyhow!("Native amount too large: {} wei", value));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ethers::types::Bytes;
+
+    fn tx_with(value: U256, input: Vec<u8>) -> Transaction {
+        let mut tx = Transaction::default();
+        tx.value = value;
+        tx.input = Bytes::from(input);
+        tx
+    }
+
+    fn one_eth_wei() -> U256 {
+        U256::from(10u64).pow(U256::from(18u64))
+    }
+
+    #[test]
+    fn zero_value_contract_call_is_not_native_transfer() {
+        // ERC-20 transfer / executeMetaTransaction: value == 0, has calldata.
+        let tx = tx_with(U256::zero(), vec![0xa9, 0x05, 0x9c, 0xbb]); // transfer(...) selector
+        assert!(!TransactionValidator::is_native_value_transfer(&tx));
+    }
+
+    #[test]
+    fn zero_value_native_is_not_native_transfer() {
+        // Nothing is being transferred natively; nothing to range-check.
+        let tx = tx_with(U256::zero(), vec![]);
+        assert!(!TransactionValidator::is_native_value_transfer(&tx));
+    }
+
+    #[test]
+    fn contract_call_with_value_is_not_native_transfer() {
+        // pay() with native value: amount enforced by contract, skip range-check.
+        let tx = tx_with(one_eth_wei(), vec![0x12, 0x34]);
+        assert!(!TransactionValidator::is_native_value_transfer(&tx));
+    }
+
+    #[test]
+    fn positive_native_transfer_is_native_transfer() {
+        let tx = tx_with(one_eth_wei(), vec![]);
+        assert!(TransactionValidator::is_native_value_transfer(&tx));
+    }
+
+    #[test]
+    fn native_value_within_bounds_ok() {
+        assert!(TransactionValidator::validate_native_value(one_eth_wei()).is_ok());
+    }
+
+    #[test]
+    fn native_value_too_large_rejected() {
+        let too_large = one_eth_wei() * U256::from(2_000u64); // 2000 ETH
+        assert!(TransactionValidator::validate_native_value(too_large).is_err());
+    }
+
+    #[test]
+    fn native_value_dust_rejected() {
+        // 1 wei is below the 0.000001 ETH dust guard.
+        assert!(TransactionValidator::validate_native_value(U256::one()).is_err());
+    }
+
+    /// Regression test for the core bug: a zero-native-value token/meta
+    /// transaction must be ACCEPTED by amount validation (previously it was
+    /// rejected as "amount too small"). We assert `validate_amount_for_tx`
+    /// returns Ok for both an ERC-20 `transfer` and an `executeMetaTransaction`.
+    #[test]
+    fn regression_zero_value_token_tx_is_accepted() {
+        // ERC-20 transfer(address,uint256): 4-byte selector + 64 bytes args, value 0.
+        let mut erc20 = vec![0xa9, 0x05, 0x9c, 0xbb];
+        erc20.extend_from_slice(&[0u8; 64]);
+        let token_tx = tx_with(U256::zero(), erc20);
+        assert!(!TransactionValidator::is_native_value_transfer(&token_tx));
+        assert!(
+            TransactionValidator::validate_amount_for_tx(&token_tx).is_ok(),
+            "zero-value ERC-20 transfer must be accepted"
+        );
+
+        // executeMetaTransaction(...)-style call: arbitrary selector, value 0.
+        let mut meta = vec![0x0c, 0x53, 0xc5, 0x1c];
+        meta.extend_from_slice(&[0u8; 128]);
+        let meta_tx = tx_with(U256::zero(), meta);
+        assert!(
+            TransactionValidator::validate_amount_for_tx(&meta_tx).is_ok(),
+            "zero-value meta-transaction must be accepted"
+        );
+    }
+
+    /// A contract call that also carries native value (e.g. a payable `pay()`)
+    /// is accepted without native range-checking — the amount is enforced by
+    /// the contract, and `data` presence marks it as a contract interaction.
+    #[test]
+    fn value_bearing_contract_call_is_accepted() {
+        let tx = tx_with(one_eth_wei(), vec![0x12, 0x34]);
+        assert!(TransactionValidator::validate_amount_for_tx(&tx).is_ok());
+    }
+
+    /// A plain native transfer is still range-checked through the same entry
+    /// point: in-bounds is accepted, dust and oversized are rejected.
+    #[test]
+    fn native_transfer_amount_still_enforced_via_entry_point() {
+        let ok_tx = tx_with(one_eth_wei(), vec![]);
+        assert!(TransactionValidator::validate_amount_for_tx(&ok_tx).is_ok());
+
+        let dust_tx = tx_with(U256::one(), vec![]);
+        assert!(TransactionValidator::validate_amount_for_tx(&dust_tx).is_err());
+
+        let huge_tx = tx_with(one_eth_wei() * U256::from(2_000u64), vec![]);
+        assert!(TransactionValidator::validate_amount_for_tx(&huge_tx).is_err());
     }
 }

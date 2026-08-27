@@ -146,6 +146,65 @@ export class PasswordHasher {
   }
 
   /**
+   * Cryptographically secure random bytes.
+   *
+   * Prefers the platform CSPRNG (`crypto.getRandomValues`, provided in React
+   * Native by the `react-native-get-random-values` polyfill) and falls back to
+   * crypto-js `WordArray.random` (also CSPRNG-backed when the polyfill is
+   * present). It NEVER uses `Math.random()`.
+   */
+  private static getRandomBytes(length: number): Uint8Array {
+    const bytes = new Uint8Array(length);
+    const cryptoObj =
+      typeof globalThis !== 'undefined'
+        ? (globalThis as unknown as {
+            crypto?: { getRandomValues?: (array: Uint8Array) => Uint8Array };
+          }).crypto
+        : undefined;
+    if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+      cryptoObj.getRandomValues(bytes);
+      return bytes;
+    }
+    // Fallback: crypto-js WordArray.random (consistent with how salts/IVs are
+    // generated elsewhere in this codebase) — still a strict improvement over
+    // Math.random().
+    const wordArray = CryptoJS.lib.WordArray.random(length);
+    for (let i = 0; i < length; i++) {
+      bytes[i] = (wordArray.words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+    }
+    return bytes;
+  }
+
+  /**
+   * Uniform random integer in [0, maxExclusive) using rejection sampling to
+   * avoid the modulo bias present in `Math.floor(Math.random() * n)`.
+   */
+  private static secureRandomInt(maxExclusive: number): number {
+    if (!Number.isInteger(maxExclusive) || maxExclusive <= 0) {
+      throw new Error('secureRandomInt: maxExclusive must be a positive integer');
+    }
+    if (maxExclusive <= 256) {
+      const limit = 256 - (256 % maxExclusive);
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const b = this.getRandomBytes(1)[0];
+        if (b < limit) {
+          return b % maxExclusive;
+        }
+      }
+    }
+    const limit = 65536 - (65536 % maxExclusive);
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const b = this.getRandomBytes(2);
+      const v = (b[0] << 8) | b[1];
+      if (v < limit) {
+        return v % maxExclusive;
+      }
+    }
+  }
+
+  /**
    * Generate a secure random password
    * @param length - Password length (default: 16)
    * @returns Secure random password
@@ -155,18 +214,24 @@ export class PasswordHasher {
     let password = '';
     
     // Ensure at least one character from each required category
-    password += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[Math.floor(Math.random() * 26)]; // Uppercase
-    password += 'abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)]; // Lowercase
-    password += '0123456789'[Math.floor(Math.random() * 10)]; // Number
-    password += '!@#$%^&*'[Math.floor(Math.random() * 8)]; // Special character
+    password += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[this.secureRandomInt(26)]; // Uppercase
+    password += 'abcdefghijklmnopqrstuvwxyz'[this.secureRandomInt(26)]; // Lowercase
+    password += '0123456789'[this.secureRandomInt(10)]; // Number
+    password += '!@#$%^&*'[this.secureRandomInt(8)]; // Special character
     
     // Fill the rest with random characters
     for (let i = 4; i < length; i++) {
-      password += charset[Math.floor(Math.random() * charset.length)];
+      password += charset[this.secureRandomInt(charset.length)];
     }
     
-    // Shuffle the password
-    return password.split('').sort(() => Math.random() - 0.5).join('');
+    // Unbiased Fisher-Yates shuffle driven by the CSPRNG (replaces the biased
+    // `sort(() => Math.random() - 0.5)` comparator shuffle).
+    const chars = password.split('');
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = this.secureRandomInt(i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    return chars.join('');
   }
 
   /**
