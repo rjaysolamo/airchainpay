@@ -22,8 +22,11 @@ dist/
 logs/
 *.log
 
-# Data
+# Data (runtime data dirs only — NOT app source folders named "data")
 data/
+# Keep the landing app's source data (design tokens/content) tracked
+!airchainpay-landing/src/data/
+!airchainpay-landing/src/data/**
 
 # Mobile app
 .expo/
