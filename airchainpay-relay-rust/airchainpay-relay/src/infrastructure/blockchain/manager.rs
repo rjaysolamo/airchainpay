@@ -128,6 +128,24 @@ pub struct TokenMetaTransactionParams {
 // MetaTransactionParams { chain_id, from, to, amount, payment_reference, deadline, signature }
 // TokenMetaTransactionParams { chain_id, from, to, token, amount, payment_reference, deadline, signature }
 
+/// Extract a required transaction receipt from a completed `PendingTransaction`.
+///
+/// A `PendingTransaction`'s future resolves to `Option<TransactionReceipt>`,
+/// where `None` means the transaction was dropped from the mempool or timed out
+/// before it was mined — a normal, recoverable blockchain condition. The
+/// previous code called `.unwrap()` on this `Option`, which would **panic the
+/// entire relay** whenever that happened. This helper instead returns a
+/// descriptive, recoverable error so callers can surface a clean failure to the
+/// client and keep the relay running.
+fn require_receipt<T>(receipt: Option<T>, context: &str) -> Result<T> {
+    receipt.ok_or_else(|| {
+        anyhow!(
+            "No transaction receipt available for {}: the transaction was dropped or timed out before it was mined",
+            context
+        )
+    })
+}
+
 impl BlockchainManager {
 
     /// Execute a meta-transaction on the AirChainPay contract
@@ -140,8 +158,8 @@ impl BlockchainManager {
         )?;
         
         let pending_tx = call.send().await?;
-        let receipt = pending_tx.await?;
-        Ok(receipt.unwrap().transaction_hash)
+        let receipt = require_receipt(pending_tx.await?, "execute_meta_transaction")?;
+        Ok(receipt.transaction_hash)
     }
 
     /// Execute a token meta-transaction on the AirChainPayToken contract
@@ -154,8 +172,8 @@ impl BlockchainManager {
         )?;
         
         let pending_tx = call.send().await?;
-        let receipt = pending_tx.await?;
-        Ok(receipt.unwrap().transaction_hash)
+        let receipt = require_receipt(pending_tx.await?, "execute_token_meta_transaction")?;
+        Ok(receipt.transaction_hash)
     }
 
     /// Process a direct native payment
@@ -174,8 +192,8 @@ impl BlockchainManager {
         )?.value(value);
         
         let pending_tx = call.send().await?;
-        let receipt = pending_tx.await?;
-        Ok(receipt.unwrap().transaction_hash)
+        let receipt = require_receipt(pending_tx.await?, "process_native_payment")?;
+        Ok(receipt.transaction_hash)
     }
 
     /// Process a direct token payment
@@ -195,8 +213,8 @@ impl BlockchainManager {
         )?;
         
         let pending_tx = call.send().await?;
-        let receipt = pending_tx.await?;
-        Ok(receipt.unwrap().transaction_hash)
+        let receipt = require_receipt(pending_tx.await?, "process_token_payment")?;
+        Ok(receipt.transaction_hash)
     }
 
     /// Get the nonce for a user address
@@ -240,8 +258,8 @@ impl BlockchainManager {
             .ok_or_else(|| anyhow!("No provider for chain_id {}", chain_id))?;
         let raw_tx_bytes = hex::decode(signed_tx_hex.trim_start_matches("0x"))?;
         let pending_tx = provider.send_raw_transaction(Bytes::from(raw_tx_bytes)).await?;
-        let receipt = pending_tx.await?;
-        Ok(receipt.unwrap().transaction_hash)
+        let receipt = require_receipt(pending_tx.await?, "broadcast_raw")?;
+        Ok(receipt.transaction_hash)
     }
 
 
@@ -309,8 +327,8 @@ impl BlockchainManager {
             .ok_or_else(|| anyhow!("No provider for chain_id {}", chain_id))?;
         let raw_tx_bytes = hex::decode(signed_tx_hex.trim_start_matches("0x"))?;
         let pending_tx = provider.send_raw_transaction(Bytes::from(raw_tx_bytes)).await?;
-        let receipt = pending_tx.await?;
-        Ok(receipt.unwrap().transaction_hash)
+        let receipt = require_receipt(pending_tx.await?, "send_transaction")?;
+        Ok(receipt.transaction_hash)
     }
 
     /// Fetch Payment events from contracts
@@ -406,4 +424,52 @@ impl BlockchainManager {
         })
     }
 }
- 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ethers::core::types::TransactionReceipt as EthersTransactionReceipt;
+
+    /// Some(Receipt): a mined transaction resolves to a receipt, and the helper
+    /// returns it so the caller can read `transaction_hash`. This mirrors exactly
+    /// how the transaction flows in this module consume the receipt.
+    #[test]
+    fn require_receipt_returns_receipt_when_present() {
+        let expected_hash = H256::from_low_u64_be(0x1234_5678);
+        let receipt = EthersTransactionReceipt {
+            transaction_hash: expected_hash,
+            ..Default::default()
+        };
+
+        let resolved = require_receipt(Some(receipt), "execute_meta_transaction")
+            .expect("a present receipt should be returned");
+        assert_eq!(resolved.transaction_hash, expected_hash);
+    }
+
+    /// None: a dropped or timed-out transaction must yield a descriptive error
+    /// instead of panicking (the bug this change fixes).
+    #[test]
+    fn require_receipt_errors_when_receipt_missing() {
+        let result: Result<EthersTransactionReceipt> =
+            require_receipt(None, "process_native_payment");
+        let err = result.expect_err("a missing receipt must produce an error, not a panic");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("process_native_payment"),
+            "error should include the calling context: {msg}"
+        );
+        assert!(
+            msg.contains("dropped or timed out"),
+            "error should explain that the transaction was dropped or timed out: {msg}"
+        );
+    }
+
+    /// The helper only encodes `Option` handling and is independent of the
+    /// concrete receipt type; verify both arms with a trivial value type too.
+    #[test]
+    fn require_receipt_is_generic_over_value_type() {
+        assert_eq!(require_receipt(Some(42u64), "ctx").unwrap(), 42u64);
+        assert!(require_receipt::<u64>(None, "ctx").is_err());
+    }
+}
